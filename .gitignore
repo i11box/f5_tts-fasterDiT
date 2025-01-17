@@ -1,0 +1,6 @@
+/logs
+**/__pycache__
+/attention_weights
+/out
+*.wav
+*.flac

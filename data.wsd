@@ -1,0 +1,60 @@
+@startuml
+start
+
+:输入数据 (hidden_states);
+note right: 维度: (batch_size, sequence_length, hidden_dim)
+
+:计算 query, key, value;
+note right
+    query = m.to_q(hidden_states)
+    key = m.to_k(encoder_hidden_states)
+    value = m.to_v(encoder_hidden_states)
+    维度: (batch_size, sequence_length, head_dim)
+end note
+
+if (method == "output_share") then (是)
+    :重用上一个时间步的注意力输出 (m.cached_output);
+    note right: 维度: (batch_size, sequence_length, hidden_dim)
+else (否)
+    if ("cfg_attn_share" in method) then (是)
+        :分离条件分支和无条件分支;
+        note right
+            条件分支: hidden_states[:batch_size//2]
+            无条件分支: hidden_states[batch_size//2:]
+            维度: (batch_size//2, sequence_length, hidden_dim)
+        end note
+        :共享无条件分支的注意力输出;
+        note right: 维度: (batch_size, sequence_length, hidden_dim)
+    else (否)
+        if ("full_attn" in method) then (是)
+            :计算全局注意力 (all_hidden_states);
+            note right: 维度: (batch_size, sequence_length, hidden_dim)
+            :计算窗口注意力 (w_hidden_states);
+            note right: 维度: (batch_size, sequence_length, hidden_dim)
+            :计算残差 (w_residual = all_hidden_states - w_hidden_states);
+            note right: 维度: (batch_size, sequence_length, hidden_dim)
+            :存储残差 (m.cached_residual = w_residual);
+            note right: 维度: (batch_size, sequence_length, hidden_dim)
+            :输出全局注意力结果 (hidden_states = all_hidden_states);
+            note right: 维度: (batch_size, sequence_length, hidden_dim)
+        else (否)
+            if ("residual_window_attn" in method) then (是)
+                :计算窗口注意力 (w_hidden_states);
+                note right: 维度: (batch_size, sequence_length, hidden_dim)
+                :应用残差 (hidden_states = w_hidden_states + m.cached_residual);
+                note right: 维度: (batch_size, sequence_length, hidden_dim)
+            else (否)
+                :正常计算注意力 (hidden_states = self.run_forward_method(...));
+                note right: 维度: (batch_size, sequence_length, hidden_dim)
+            endif
+        endif
+    endif
+    :缓存当前时间步的输出 (m.cached_output = hidden_states);
+    note right: 维度: (batch_size, sequence_length, hidden_dim)
+endif
+
+:输出注意力结果 (hidden_states);
+note right: 维度: (batch_size, sequence_length, hidden_dim)
+
+stop
+@enduml
