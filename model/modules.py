@@ -661,35 +661,26 @@ class DiTBlock(nn.Module):
         batch_size = x.shape[0] // 2
         
         # 分离条件和无条件部分
-        x_uncond, x_cond = x[:batch_size], x[batch_size:]
+        x_cond, x_uncond = x[:batch_size], x[batch_size:]
         
         # 分别进行norm
         norm_uncond, gate_msa_uncond, shift_mlp_uncond, scale_mlp_uncond, gate_mlp_uncond = self.attn_norm(x_uncond, emb=t)
         norm_cond, gate_msa_cond, shift_mlp_cond, scale_mlp_cond, gate_mlp_cond = self.attn_norm(x_cond, emb=t)
-        
-        # 合并norm结果
-        norm = torch.cat([norm_uncond, norm_cond], dim=0)
-        gate_msa = torch.cat([gate_msa_uncond, gate_msa_cond], dim=0)
-        shift_mlp = torch.cat([shift_mlp_uncond, shift_mlp_cond], dim=0)
-        scale_mlp = torch.cat([scale_mlp_uncond, scale_mlp_cond], dim=0)
-        gate_mlp = torch.cat([gate_mlp_uncond, gate_mlp_cond], dim=0)
 
         #！首先确认压缩方法
         method = self.compress_manager.get_method(self.block_id,t)
-        if method is None:
-            method = 'none'
         
         #! 若为时间步共享，直接读取上次输出
         if 'ast' in method:
             attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
+            attn_output_cond = attn_output[:batch_size]
+            attn_output_uncond = attn_output[batch_size:]
         
         #! 若为条件间的共享
         elif 'acs' in method:
-            # 只计算无条件部分的attention
-            norm_uncond = norm[:batch_size]
-            attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope)
+            attn_output_cond = attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope)
             # 复制条件部分的输出到无条件部分
-            attn_output = torch.cat([attn_output_uncond, attn_output_uncond], dim=0)
+            attn_output = torch.cat([attn_output_cond, attn_output_uncond], dim=0)
 
         #! 正常计算，为窗口残差做准备
 
@@ -698,35 +689,43 @@ class DiTBlock(nn.Module):
                 # 使用窗口注意力
                 window_attn_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope, window_ratio=0.125)
                 window_attn_cond = self.attn(x=norm_cond, mask=mask,rope=rope, window_ratio=0.125)
-                window_attn = torch.cat([window_attn_uncond, window_attn_cond], dim=0)
+                window_attn = torch.cat([window_attn_cond, window_attn_uncond], dim=0)
 
                 if self.compress_manager.cached_window_res is None:
                     # 计算完整注意力
                     attn_output_uncond = self.attn(x=norm_uncond, mask=mask,rope=rope)
                     attn_output_cond = self.attn(x=norm_cond, mask=mask,rope=rope)
-                    attn_output = torch.cat([attn_output_uncond, attn_output_cond], dim=0)
+                    attn_output = torch.cat([attn_output_cond, attn_output_uncond], dim=0)
 
                     # 计算并缓存残差
                     residual = attn_output - window_attn
                     self.compress_manager.cached_window_res = residual
                 else:
                     attn_output = window_attn + self.compress_manager.cached_window_res
+                    attn_output_cond = attn_output[:batch_size]
+                    attn_output_uncond = attn_output[batch_size:]
             else:
                 # 计算完整注意力
                 attn_output_uncond = self.attn(x=norm_uncond, mask=mask,rope=rope)
                 attn_output_cond = self.attn(x=norm_cond, mask=mask,rope=rope)
-                attn_output = torch.cat([attn_output_uncond, attn_output_cond], dim=0)
+                attn_output = torch.cat([attn_output_cond, attn_output_uncond], dim=0)
 
         #! 缓存ast
         self.compress_manager.cached_last_output = attn_output
 
         # process attention output for input x
-        x = x + gate_msa.unsqueeze(1) * attn_output
+        # x = x + gate_msa.unsqueeze(1) * attn_output
+        x_uncond = x_uncond + gate_msa_uncond.unsqueeze(1) * attn_output_uncond
+        x_cond = x_cond + gate_msa_cond.unsqueeze(1) * attn_output_cond
 
-        norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        ff_output = self.ff(norm)
-        x = x + gate_mlp.unsqueeze(1) * ff_output
-
+        norm_uncond = self.ff_norm(x_uncond) * (1 + scale_mlp_uncond[:, None]) + shift_mlp_uncond[:, None]
+        norm_cond = self.ff_norm(x_cond) * (1 + scale_mlp_cond[:, None]) + shift_mlp_cond[:, None]
+        ff_output_uncond = self.ff(norm_uncond)
+        ff_output_cond = self.ff(norm_cond)
+        x_cond = x_cond + gate_mlp_cond.unsqueeze(1) * ff_output_cond
+        x_uncond = x_uncond + gate_mlp_uncond.unsqueeze(1) * ff_output_uncond
+        x = torch.cat([x_cond, x_uncond], dim=0)
+        
         return x
 
 

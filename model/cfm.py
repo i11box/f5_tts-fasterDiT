@@ -161,26 +161,19 @@ class CFM(nn.Module):
         # neural ode
 
         def fn(t, x):
-            Logger().debug("=== Modified Model Sampling ===")
-            Logger().debug(f"Input x shape: {x.shape}, text shape: {text.shape}")
             # 1. 准备拼接输入
-            x_double = torch.cat([x, x], dim=0)  # [2b, n, d]
-            step_cond_double = torch.cat([step_cond, step_cond], dim=0)
-            text_double = torch.cat([text, text], dim=0) if isinstance(text, torch.Tensor) else text
-            Logger().debug(f"After concat - x shape: {x.shape}, text shape: {text.shape}")
+            x = torch.cat([x,x], dim=0)
             # 2. 一次性计算条件和无条件
             pred = self.transformer(
-                x=x_double, 
-                cond=step_cond_double,
-                text=text_double,
+                x=x, 
+                cond=step_cond,
+                text=text,
                 time=t,
                 mask=mask
             )
             
             # 3. 分离条件和无条件预测
             cond_pred, uncond_pred = pred.chunk(2, dim=0)
-            Logger().debug(f"Before CFG - cond range: [{cond_pred.min():.4f}, {cond_pred.max():.4f}]")
-            Logger().debug(f"Before CFG - uncond range: [{uncond_pred.min():.4f}, {uncond_pred.max():.4f}]")
             
             # 4. CFG
             if cfg_strength > 1e-5:
@@ -188,7 +181,14 @@ class CFM(nn.Module):
             else:
                 pred = cond_pred
             
-            Logger().debug(f"After CFG - range: [{pred.min():.4f}, {pred.max():.4f}]")
+            # 保存输出结果
+            torch.save({
+                'cond_pred': cond_pred.detach().cpu(),
+                'uncond_pred': uncond_pred.detach().cpu(),
+                'output': pred.detach().cpu(),
+                'time_step': t.item()
+            }, f'new_pred_{t.item():.3f}.pt')
+            
             return pred
 
         # noise input
