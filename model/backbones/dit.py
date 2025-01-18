@@ -113,8 +113,8 @@ class DiT(nn.Module):
         self.time_embed = TimestepEmbedding(dim)
         if text_dim is None:
             text_dim = mel_dim
-        self.text_embed = TextEmbedding(text_num_embeds, text_dim, conv_layers=conv_layers)
-        self.input_embed = InputEmbedding(mel_dim, text_dim, dim)
+        self.text_embed = TextEmbedding(text_num_embeds, text_dim, conv_layers=conv_layers) #! 输入维度增倍
+        self.input_embed = InputEmbedding(mel_dim, text_dim, dim) #！输入维度增倍
 
         self.rotary_embed = RotaryEmbedding(dim_head)
 
@@ -131,37 +131,55 @@ class DiT(nn.Module):
 
     def forward(
         self,
-        x: float["b n d"],  # nosied input audio  # noqa: F722
-        cond: float["b n d"],  # masked cond audio  # noqa: F722
-        text: int["b nt"],  # text  # noqa: F722
+        x: float["b n d"],  # nosied input audio*2  # noqa: F722
+        cond: float["b n d"],  # masked cond audio*2  # noqa: F722
+        text: int["b nt"],  # text*2  # noqa: F722
         time: float["b"] | float[""],  # time step  # noqa: F821 F722
-        drop_audio_cond,  # cfg for cond audio
-        drop_text,  # cfg for text
         mask: bool["b n"] | None = None,  # noqa: F722
     ):
-        batch, seq_len = x.shape[0], x.shape[1]
+        batch, seq_len = x.shape[0]//2, x.shape[1]
         if time.ndim == 0:
             time = time.repeat(batch)
 
         # t: conditioning time, c: context (text + masked cond audio), x: noised input audio
         t = self.time_embed(time)
-        text_embed = self.text_embed(text, seq_len, drop_text=drop_text)
-        x = self.input_embed(x, cond, text_embed, drop_audio_cond=drop_audio_cond)
+        #! text变成两倍了，分别处理条件和无条件部分
+        batch_size = text.shape[0] // 2
+        text_uncond = self.text_embed(text[:batch_size], seq_len, drop_text=True)
+        text_cond = self.text_embed(text[batch_size:], seq_len, drop_text=False)
+        
+        #! cond变成两倍了，分别处理条件和无条件部分
+        cond_uncond = cond[:batch_size]
+        cond_cond = cond[batch_size:]        
+        
+        #！x也要作拆分
+        x_uncond, x_cond = x.chunk(2, dim=0)
+        x_uncond = self.input_embed(x_uncond, cond_uncond, text_uncond, drop_audio_cond=True)
+        x_cond = self.input_embed(x_cond, cond_cond, text_cond, drop_audio_cond=False)
+
+        #！再合并
+        x = torch.cat((x_uncond, x_cond), dim=0)
 
         rope = self.rotary_embed.forward_from_seq_len(seq_len)
 
         if self.long_skip_connection is not None:
-            residual = x
+            residual_cond = x_cond
+            residual_uncond = x_uncond
 
         for block in self.transformer_blocks:
             x = block(x, t, mask=mask, rope=rope)
 
         if self.long_skip_connection is not None:
-            x = self.long_skip_connection(torch.cat((x, residual), dim=-1))
+            x_uncond, x_cond = x.chunk(2, dim=0)
+            x_cond = self.long_skip_connection(torch.cat((x_cond, residual_cond), dim=-1))
+            x_uncond = self.long_skip_connection(torch.cat((x_uncond, residual_uncond), dim=-1))
 
-        x = self.norm_out(x, t)
-        output = self.proj_out(x)                                                                                                                                                                                                                                                                         
-
+        x_cond = self.norm_out(x_cond, t)
+        x_cond = self.proj_out(x_cond)
+        x_uncond = self.norm_out(x_uncond, t)
+        x_uncond = self.proj_out(x_uncond)
+        output = torch.cat((x_uncond, x_cond), dim=0)
+        
         return output
 
     #! 汇报FLOPS数

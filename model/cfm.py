@@ -161,20 +161,30 @@ class CFM(nn.Module):
         # neural ode
 
         def fn(t, x):
-            # at each step, conditioning is fixed
-            # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
-
-            # predict flow
+            # 1. 准备拼接输入
+            x_double = torch.cat([x, x], dim=0)  # [2b, n, d]
+            step_cond_double = torch.cat([step_cond, step_cond], dim=0)
+            text_double = torch.cat([text, text], dim=0) if isinstance(text, torch.Tensor) else text
+            
+            # 2. 一次性计算条件和无条件
             pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False
+                x=x_double, 
+                cond=step_cond_double,
+                text=text_double,
+                time=t,
+                mask=mask
             )
-            if cfg_strength < 1e-5:
-                return pred
-
-            null_pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
-            )
-            return pred + (pred - null_pred) * cfg_strength
+            
+            # 3. 分离条件和无条件预测
+            cond_pred, uncond_pred = pred.chunk(2, dim=0)
+            
+            # 4. CFG
+            if cfg_strength > 1e-5:
+                pred = cond_pred + (cond_pred - uncond_pred) * cfg_strength
+            else:
+                pred = cond_pred
+                
+            return pred
 
         # noise input
         # to make sure batch inference result is same with different batch size, and for sure single inference
