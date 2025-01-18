@@ -26,9 +26,9 @@ from f5_tts.model.utils import (
     lens_to_mask,
     list_str_to_idx,
     list_str_to_tensor,
-    mask_from_frac_lengths,
+    mask_from_frac_lengths
 )
-
+from f5_tts.model.logger import Logger
 
 class CFM(nn.Module):
     def __init__(
@@ -161,11 +161,13 @@ class CFM(nn.Module):
         # neural ode
 
         def fn(t, x):
+            Logger().debug("=== Modified Model Sampling ===")
+            Logger().debug(f"Input x shape: {x.shape}, text shape: {text.shape}")
             # 1. 准备拼接输入
             x_double = torch.cat([x, x], dim=0)  # [2b, n, d]
             step_cond_double = torch.cat([step_cond, step_cond], dim=0)
             text_double = torch.cat([text, text], dim=0) if isinstance(text, torch.Tensor) else text
-            
+            Logger().debug(f"After concat - x shape: {x.shape}, text shape: {text.shape}")
             # 2. 一次性计算条件和无条件
             pred = self.transformer(
                 x=x_double, 
@@ -177,13 +179,16 @@ class CFM(nn.Module):
             
             # 3. 分离条件和无条件预测
             cond_pred, uncond_pred = pred.chunk(2, dim=0)
+            Logger().debug(f"Before CFG - cond range: [{cond_pred.min():.4f}, {cond_pred.max():.4f}]")
+            Logger().debug(f"Before CFG - uncond range: [{uncond_pred.min():.4f}, {uncond_pred.max():.4f}]")
             
             # 4. CFG
             if cfg_strength > 1e-5:
                 pred = cond_pred + (cond_pred - uncond_pred) * cfg_strength
             else:
                 pred = cond_pred
-                
+            
+            Logger().debug(f"After CFG - range: [{pred.min():.4f}, {pred.max():.4f}]")
             return pred
 
         # noise input
