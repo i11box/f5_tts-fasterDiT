@@ -392,7 +392,7 @@ class Attention(nn.Module):
         if c is not None:
             return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope, block_id=self.block_id,window_ratio=window_ratio)
         else:
-            return self.processor(self, x, mask=mask, rope=rope, window_ratio=window_ratio)
+            return self.processor(self, x, mask=mask, rope=rope, block_id=self.block_id,window_ratio=window_ratio)
 
 
 
@@ -661,14 +661,15 @@ class DiTBlock(nn.Module):
         batch_size = x.shape[0] // 2
         
         # 分离条件和无条件部分
-        x_cond, x_uncond = x[:batch_size], x[batch_size:]
+        x_cond, x_uncond = x.chunk(2, dim=0)
         
         # 分别进行norm
         norm_uncond, gate_msa_uncond, shift_mlp_uncond, scale_mlp_uncond, gate_mlp_uncond = self.attn_norm(x_uncond, emb=t)
         norm_cond, gate_msa_cond, shift_mlp_cond, scale_mlp_cond, gate_mlp_cond = self.attn_norm(x_cond, emb=t)
 
         #！首先确认压缩方法
-        method = self.compress_manager.get_method(self.block_id,t)
+        # method = self.compress_manager.get_method(self.block_id,t)
+        method = 'none'
         
         #! 若为时间步共享，直接读取上次输出
         if 'ast' in method:
@@ -702,8 +703,7 @@ class DiTBlock(nn.Module):
                     self.compress_manager.cached_window_res = residual
                 else:
                     attn_output = window_attn + self.compress_manager.cached_window_res
-                    attn_output_cond = attn_output[:batch_size]
-                    attn_output_uncond = attn_output[batch_size:]
+                    attn_output_cond,attn_output_uncond = attn_output.chunk(2, dim=0)
             else:
                 # 计算完整注意力
                 attn_output_uncond = self.attn(x=norm_uncond, mask=mask,rope=rope)

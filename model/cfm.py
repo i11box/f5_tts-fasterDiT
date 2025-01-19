@@ -182,12 +182,12 @@ class CFM(nn.Module):
                 pred = cond_pred
             
             # 保存输出结果
-            torch.save({
-                'cond_pred': cond_pred.detach().cpu(),
-                'uncond_pred': uncond_pred.detach().cpu(),
-                'output': pred.detach().cpu(),
-                'time_step': t.item()
-            }, f'new_pred_{t.item():.3f}.pt')
+            # torch.save({
+            #     'cond_pred': cond_pred.detach().cpu(),
+            #     'uncond_pred': uncond_pred.detach().cpu(),
+            #     'output': pred.detach().cpu(),
+            #     'time_step': t.item()
+            # }, f'new_pred_{t.item():.3f}.pt')
             
             return pred
 
