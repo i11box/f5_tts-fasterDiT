@@ -4,3 +4,5 @@
 /out
 *.wav
 *.flac
+*.pt
+*.png
