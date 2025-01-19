@@ -338,15 +338,14 @@ class FeedForward(nn.Module):
 class Attention(nn.Module):
     def __init__(
         self,
-        processor: JointAttnProcessor | AttnProcessor ,
+        processor: JointAttnProcessor | AttnProcessor,
         dim: int,
         heads: int = 8,
         dim_head: int = 64,
         dropout: float = 0.0,
         context_dim: Optional[int] = None,  # if not None -> joint attention
         context_pre_only=None,
-        block_id=None,
-        window_ratio=None
+        block_id=None
     ):
         super().__init__()
 
@@ -387,64 +386,16 @@ class Attention(nn.Module):
         mask: bool["b n"] | None = None,  # noqa: F722
         rope=None,  # rotary position embedding for x
         c_rope=None,  # rotary position embedding for c
-        window_ratio=None  # 窗口比例参数
     ) -> torch.Tensor:
         if c is not None:
-            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope, block_id=self.block_id,window_ratio=window_ratio)
+            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id)
         else:
-            return self.processor(self, x, mask=mask, rope=rope, block_id=self.block_id,window_ratio=window_ratio)
-
-
-
-# Attention processor
+            return self.processor(self, x, mask=mask, rope=rope)
 
 
 class AttnProcessor:
     def __init__(self):
         self.flops_counter = FLOPsCounter() #! 计数器
-
-    def _create_window_mask(self, seq_len, window_ratio=None):
-        """创建滑动窗口掩码
-        Args:
-            seq_len: 序列长度
-            window_ratio: 窗口比例,default 0.125
-        """
-        mask = None
-        if window_ratio is None:
-            return mask
-        else:
-            window_size = int(seq_len * window_ratio)
-            mask = torch.zeros(seq_len, seq_len, dtype=torch.bool)
-            for i in range(seq_len):
-                start = max(0, i - window_size // 2)
-                end = min(seq_len, i + window_size // 2 + 1)
-                mask[i, start:end] = True
-            return mask
-
-    # 结合传入掩码和窗口比得到最终掩码
-    def _get_final_mask(self, mask, x, attn_heads, window_ratio=None):
-        if window_ratio is not None:
-            window_mask = self._create_window_mask(x.shape[1], window_ratio).to(x.device) # 创建窗口掩码 [seq_len, seq_len]
-            window_mask = window_mask.unsqueeze(0).unsqueeze(0) # 扩展到 [1, 1, seq_len, seq_len]
-            # 扩展到所有batch和head [batch_size, n_heads, seq_len, seq_len]
-            window_mask = window_mask.expand(x.shape[0], attn_heads, x.shape[1], x.shape[1])
-            
-            if mask is not None:
-                # 处理padding掩码 [batch_size, seq_len] -> [batch_size, 1, 1, seq_len]
-                attn_mask = mask.unsqueeze(1).unsqueeze(1) # 扩展到 [batch_size, 1, 1, seq_len]
-                attn_mask = attn_mask.expand(x.shape[0], attn_heads, x.shape[1], x.shape[1])
-                # 组合掩码
-                final_mask = window_mask & attn_mask
-            else:
-                final_mask = window_mask
-        elif mask is not None:
-            # 原有的掩码处理逻辑
-            attn_mask = mask.unsqueeze(1).unsqueeze(1)  # 'b n -> b 1 1 n'
-            final_mask = attn_mask.expand(x.shape[0], attn_heads, x.shape[1], x.shape[1])
-        else:
-            final_mask = None
-
-        return final_mask
 
     def __call__(
         self,
@@ -452,11 +403,8 @@ class AttnProcessor:
         x: float["b n d"],  # noised input x  # noqa: F722
         mask: bool["b n"] | None = None,  # noqa: F722
         rope=None,  # rotary position embedding
-        block_id=None,
-        window_ratio=None
+        block_id=None
     ) -> torch.FloatTensor:
-        attn_mask = self._get_final_mask(mask, x,attn.heads, window_ratio)
-
         batch_size = x.shape[0]
 
         # `sample` projections.
@@ -485,7 +433,13 @@ class AttnProcessor:
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
 
-        # mask. e.g. inference got a batch with different target durations, mask out the padding (原掩码处理逻辑)
+        # mask. e.g. inference got a batch with different target durations, mask out the padding
+        if mask is not None:
+            attn_mask = mask
+            attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)  # 'b n -> b 1 1 n'
+            attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+        else:
+            attn_mask = None
 
         #! 统计注意力计算的FLOPS
         self.flops_counter.add_attention_flops(query, key, value, attn.heads)
@@ -534,6 +488,8 @@ class AttnProcessor:
 
 # Joint Attention processor for MM-DiT
 # modified from diffusers/src/diffusers/models/attention_processor.py
+
+
 
 
 class JointAttnProcessor:
@@ -657,9 +613,7 @@ class DiTBlock(nn.Module):
         self.compress_manager = CompressManager() #！记录压缩情况
 
     def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
-        
-        batch_size = x.shape[0] // 2
-        
+                
         # 分离条件和无条件部分
         x_cond, x_uncond = x.chunk(2, dim=0)
         
@@ -667,51 +621,8 @@ class DiTBlock(nn.Module):
         norm_uncond, gate_msa_uncond, shift_mlp_uncond, scale_mlp_uncond, gate_mlp_uncond = self.attn_norm(x_uncond, emb=t)
         norm_cond, gate_msa_cond, shift_mlp_cond, scale_mlp_cond, gate_mlp_cond = self.attn_norm(x_cond, emb=t)
 
-        #！首先确认压缩方法
-        # method = self.compress_manager.get_method(self.block_id,t)
-        method = 'none'
-        
-        #! 若为时间步共享，直接读取上次输出
-        if 'ast' in method:
-            attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
-            attn_output_cond = attn_output[:batch_size]
-            attn_output_uncond = attn_output[batch_size:]
-        
-        #! 若为条件间的共享
-        elif 'acs' in method:
-            attn_output_cond = attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope)
-            # 复制条件部分的输出到无条件部分
-            attn_output = torch.cat([attn_output_cond, attn_output_uncond], dim=0)
-
-        #! 正常计算，为窗口残差做准备
-
-        else:
-            if 'wars' in method:
-                # 使用窗口注意力
-                window_attn_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope, window_ratio=0.125)
-                window_attn_cond = self.attn(x=norm_cond, mask=mask,rope=rope, window_ratio=0.125)
-                window_attn = torch.cat([window_attn_cond, window_attn_uncond], dim=0)
-
-                if self.compress_manager.cached_window_res is None:
-                    # 计算完整注意力
-                    attn_output_uncond = self.attn(x=norm_uncond, mask=mask,rope=rope)
-                    attn_output_cond = self.attn(x=norm_cond, mask=mask,rope=rope)
-                    attn_output = torch.cat([attn_output_cond, attn_output_uncond], dim=0)
-
-                    # 计算并缓存残差
-                    residual = attn_output - window_attn
-                    self.compress_manager.cached_window_res = residual
-                else:
-                    attn_output = window_attn + self.compress_manager.cached_window_res
-                    attn_output_cond,attn_output_uncond = attn_output.chunk(2, dim=0)
-            else:
-                # 计算完整注意力
-                attn_output_uncond = self.attn(x=norm_uncond, mask=mask,rope=rope)
-                attn_output_cond = self.attn(x=norm_cond, mask=mask,rope=rope)
-                attn_output = torch.cat([attn_output_cond, attn_output_uncond], dim=0)
-
-        #! 缓存ast
-        self.compress_manager.cached_last_output = attn_output
+        attn_output_uncond = self.attn(x=norm_uncond, mask=mask,rope=rope)
+        attn_output_cond = self.attn(x=norm_cond, mask=mask,rope=rope)
 
         # process attention output for input x
         # x = x + gate_msa.unsqueeze(1) * attn_output
