@@ -14,6 +14,7 @@ from typing import Callable
 
 import torch
 import torch.nn.functional as F
+import copy
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
@@ -63,6 +64,7 @@ class CFM(nn.Module):
 
         # transformer
         self.transformer = transformer
+        self.transformer_uncond = None  # 初始化为None
         dim = transformer.dim
         self.dim = dim
 
@@ -74,6 +76,20 @@ class CFM(nn.Module):
 
         # vocab map for tokenization
         self.vocab_char_map = vocab_char_map
+
+    def _create_uncond_transformer(self):
+        """创建并设置无条件transformer"""
+        if self.transformer_uncond is None:
+            self.transformer_uncond = copy.deepcopy(self.transformer)
+            # 复制权重
+            self.transformer_uncond.load_state_dict(self.transformer.state_dict())
+
+    def load_state_dict(self, state_dict, strict=True):
+        """重写load_state_dict方法"""
+        # 先加载条件模型的权重
+        super().load_state_dict(state_dict, strict=strict)
+        # 然后创建无条件模型
+        self._create_uncond_transformer()
 
     @property
     def device(self):
@@ -100,7 +116,7 @@ class CFM(nn.Module):
     ):
         self.eval()
         # raw wave
-
+        self._create_uncond_transformer()
         if cond.ndim == 2:
             cond = self.mel_spec(cond)
             cond = cond.permute(0, 2, 1)
@@ -158,6 +174,11 @@ class CFM(nn.Module):
         if no_ref_audio:
             cond = torch.zeros_like(cond)
 
+        # 设置条件块的引用
+        for i, uncond_block in enumerate(self.transformer_uncond.transformer_blocks):
+            cond_block = self.transformer.transformer_blocks[i]
+            uncond_block.cond_dit = cond_block
+
         # neural ode
 
         def fn(t, x):
@@ -171,7 +192,7 @@ class CFM(nn.Module):
             if cfg_strength < 1e-5:
                 return pred
 
-            null_pred = self.transformer(
+            null_pred = self.transformer_uncond(
                 x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
             )
             return pred + (pred - null_pred) * cfg_strength

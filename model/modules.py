@@ -716,6 +716,7 @@ class DiTBlock(nn.Module):
         self.ff_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff = FeedForward(dim=dim, mult=ff_mult, dropout=dropout, approximate="tanh")
         self.compress_manager = CompressManager() #！记录压缩情况
+        self.cond_dit = None #! 如果是无条件DiT，它将会指向有条件DiT对应块
 
     def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
         
@@ -724,15 +725,18 @@ class DiTBlock(nn.Module):
 
         #！首先确认压缩方法
         method = self.compress_manager.get_method(self.block_id,t)
+        method = 'none' #TODO:记得删
         
         #! 若为时间步共享，直接读取上次输出
         if method == 'ast':
             attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
 
         #! 若为条件间的共享
+        if 'asc' in method:
+            attn_output = self.cond_dit.compress_manager.cached_last_output if self.cond_dit.compress_manager.cached_last_output is not None else x
 
         #! 无策略
-        if method == None:
+        if method == 'none':
             attn_output = self.attn(x=norm, mask=mask, rope=rope)
 
         #! 缓存ast
