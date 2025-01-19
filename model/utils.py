@@ -114,10 +114,18 @@ class CompressManager:
 
     def __init__(self):
         self.compress_dict = {}
-        self.strategy = ['wars','ast','wars;asc','asc']
+        self.strategy = ['wars','ast','asc']
         self.cached_last_output = None
         self.cached_window_res = None
     
+    def compression_isok(a, b, delta):
+        ls = []
+        for ai, bi in zip(a, b):
+            if isinstance(ai, torch.Tensor):
+                diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
+                l = diff.abs().clip(0, 10).mean()
+                ls.append(l)
+        return sum(ls) / len(ls) < delta
     
     def record(self, strategy,t):
         """

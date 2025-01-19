@@ -117,7 +117,7 @@ class CFM(nn.Module):
         self.eval()
         # raw wave
         self._create_uncond_transformer()
-        if cond.ndim == 2:
+        if cond.ndim == 2: 
             cond = self.mel_spec(cond)
             cond = cond.permute(0, 2, 1)
             assert cond.shape[-1] == self.num_channels
