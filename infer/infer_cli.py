@@ -85,6 +85,7 @@ parser.add_argument(
     default=1.0,
     help="Adjust the speed of the audio generation (default: 1.0)",
 )
+
 args = parser.parse_args()
 
 config = tomli.load(open(args.config, "rb"))

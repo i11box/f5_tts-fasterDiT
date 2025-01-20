@@ -29,7 +29,7 @@ class FLOPsCounter:
         self.attention_flops = 0
         self.linear_flops = 0
     
-    def add_attention_flops(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int):
+    def add_attention_flops(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int,window_ratio=None):
         """添加注意力机制的FLOPS
         
         Args:
@@ -38,18 +38,24 @@ class FLOPsCounter:
             value: Value tensor of shape [batch_size, seq_len_v, dim]
             heads: Number of attention heads
         """
-        flops = self.count_attention_flops(query, key, value, heads)
+        flops = self.count_attention_flops(query, key, value, heads,window_ratio)
         self.attention_flops += flops
         self.total_flops += flops
     
-    def add_linear_flops(self, input_size: int, output_size: int, batch_size: int, seq_len: int):
+    def add_linear_flops(
+        self,
+        input_size: int,
+        output_size: int,
+        batch_size: int,
+        seq_len: int
+        ):
         """添加线性层的FLOPS"""
         flops = self.count_linear_flops(input_size, output_size, batch_size, seq_len)
         self.linear_flops += flops
         self.total_flops += flops
     
     @staticmethod
-    def count_attention_flops(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int):
+    def count_attention_flops(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int,window_ratio=None):
         """统计注意力机制的FLOPS
         
         Args:
@@ -62,21 +68,33 @@ class FLOPsCounter:
             total_flops: 注意力计算的总FLOPS数
         """
         # 获取张量形状
-        batch_size, num_heads, q_seq_len, head_dim = query.size()
-        _, _, kv_seq_len, _ = key.size()
-        dim = head_dim * heads
+        batch_size, num_heads, seq_len, head_dim = query.shape
         
-        # Q·K^T的FLOPS = batch_size * heads * q_seq_len * kv_seq_len * head_dim
-        qk_flops = batch_size * heads * q_seq_len * kv_seq_len * head_dim
-        
-        # Softmax的FLOPS
-        # 每个位置需要一个exp运算和一个除法运算
-        softmax_flops = batch_size * heads * q_seq_len * kv_seq_len * 2
-        
-        # Attention·V的FLOPS
-        av_flops = batch_size * heads * q_seq_len * kv_seq_len * head_dim
-        
+        # 1. Q @ K^T 的FLOPS
+        if window_ratio is not None:
+            # 窗口注意力：每个token只和窗口内的token计算注意力
+            window_size = max(1, int(seq_len * window_ratio))
+            if window_size % 2 == 0:
+                window_size += 1
+            qk_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
+        else:
+            # 普通注意力：每个token和所有token计算注意力
+            qk_flops = batch_size * num_heads * seq_len * seq_len * head_dim * 2
+            
+        # 2. Softmax的FLOPS (exp + sum + div)
+        if window_ratio is not None:
+            softmax_flops = batch_size * num_heads * seq_len * window_size * 3
+        else:
+            softmax_flops = batch_size * num_heads * seq_len * seq_len * 3
+            
+        # 3. attention @ V 的FLOPS
+        if window_ratio is not None:
+            av_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
+        else:
+            av_flops = batch_size * num_heads * seq_len * seq_len * head_dim * 2
+            
         total_flops = qk_flops + softmax_flops + av_flops
+        
         return total_flops
     
     @staticmethod

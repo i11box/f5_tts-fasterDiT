@@ -486,7 +486,7 @@ class AttnProcessor:
         # mask. e.g. inference got a batch with different target durations, mask out the padding
 
         #! 统计注意力计算的FLOPS
-        self.flops_counter.add_attention_flops(query, key, value, attn.heads)
+        self.flops_counter.add_attention_flops(query, key, value, attn.heads,window_ratio)
 
         x = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
         x = x.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
