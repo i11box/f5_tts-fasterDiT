@@ -232,9 +232,12 @@ class CFM(nn.Module):
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        self.transformer.load_compression_strategies('method_cond.json',is_cond=True)
-        self.transformer_uncond.load_compression_strategies('method_uncond.json',is_cond = False)
-
+        self.transformer.set_all_block_id()
+        self.transformer_uncond.set_all_block_id()
+        #-----------加载策略文件时取消注释--------------
+        # self.transformer.load_compression_strategies('method_cond_0.15.json',is_cond=True)
+        # self.transformer_uncond.load_compression_strategies('method_uncond_0.15.json',is_cond = False)
+        #---------------------------------------------------------
         trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
 
         sampled = trajectory[-1]
@@ -245,8 +248,8 @@ class CFM(nn.Module):
             out = out.permute(0, 2, 1)
             out = vocoder(out)
 
-        # self.transformer.save_compression_strategies('method_cond.json')
-        # self.transformer_uncond.save_compression_strategies('method_uncond.json')
+        # self.transformer.save_compression_strategies('method_cond_0.15.json')
+        # self.transformer_uncond.save_compression_strategies('method_uncond_0.15.json')
 
         return out, trajectory
 

@@ -764,8 +764,6 @@ class DiTBlock(nn.Module):
         # pre-norm & modulation for attention input
         norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
 
-        logger = Logger()
-
         #！首先确认压缩方法
         method = self.compress_manager.get_method(self.block_id,self.cur_step)
         
@@ -800,7 +798,7 @@ class DiTBlock(nn.Module):
         # for strategy in self.compress_manager.strategy:
         #     if strategy in strategy_outputs:
         #         output = strategy_outputs[strategy]
-        #         if self.compress_manager.compression_isok(attn_output, output, delta=0.1, block_id=self.block_id):
+        #         if self.compress_manager.compression_isok(attn_output, output, delta=0.15, block_id=self.block_id):
         #             attn_output = output
         #             self.compress_manager.record(strategy, self.cur_step)
         #             break

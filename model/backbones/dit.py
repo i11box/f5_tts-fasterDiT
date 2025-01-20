@@ -348,3 +348,13 @@ class DiT(nn.Module):
                 count = stats['strategy_counts'][strategy]
                 if count > 0:
                     print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
+    
+    def set_all_block_id(self):
+        cnt = 0
+        for block in self.transformer_blocks:
+            block.block_id = cnt
+            cnt += 1
+    
+    def set_all_block_no_method(self):
+        for block in self.transformer_blocks:
+            block.compress_manager.compress_dict = {}

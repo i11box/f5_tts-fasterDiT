@@ -157,7 +157,7 @@ class CompressManager:
         """
         获取指定时间步的压缩策略
         """
-        return self.compress_dict.get(block_id,{}).get(f'{t.item():.3f}', 'none')
+        return self.compress_dict.get(f'{t.item():.3f}', 'none')
 
 # seed everything
 
