@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from torch.utils.tensorboard import SummaryWriter
 
 class Logger: 
     def __init__(self, name="F5TTS", log_dir="./logs", max_log_size=100*1024*1024, backup_count=5):
@@ -17,6 +18,15 @@ class Logger:
         self.log_dir = log_dir
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
+            
+        # 创建tensorboard目录
+        self.tb_dir = os.path.join(log_dir, 'tensorboard')
+        if not os.path.exists(self.tb_dir):
+            os.makedirs(self.tb_dir)
+            
+        # 初始化tensorboard writer
+        self.writer = SummaryWriter(log_dir=self.tb_dir)
+            
         # 生成日志文件名,包含时间戳
         log_file = os.path.join(log_dir, f'{name}.log')
         # 创建日志记录器
@@ -46,6 +56,10 @@ class Logger:
     def debug(self, message):
         """记录调试级别的日志"""
         self.logger.debug(message)
+        
+    def add_scalar(self, tag, scalar_value, global_step=None):
+        """记录标量值到tensorboard"""
+        self.writer.add_scalar(tag, scalar_value, global_step)
 
     def info(self, message):
         """记录信息级别的日志"""

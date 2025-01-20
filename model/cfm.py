@@ -9,6 +9,7 @@ d - dimension
 
 from __future__ import annotations
 
+from logging import Logger
 from random import random
 from typing import Callable
 
@@ -29,6 +30,7 @@ from f5_tts.model.utils import (
     list_str_to_tensor,
     mask_from_frac_lengths,
 )
+from f5_tts.model.logger import Logger
 
 
 class CFM(nn.Module):
@@ -83,6 +85,17 @@ class CFM(nn.Module):
             self.transformer_uncond = copy.deepcopy(self.transformer)
             # 复制权重
             self.transformer_uncond.load_state_dict(self.transformer.state_dict())
+            
+            # 设置条件和无条件块的引用关系
+            for i, uncond_block in enumerate(self.transformer_uncond.transformer_blocks):
+                cond_block = self.transformer.transformer_blocks[i]
+                # 确保block_id被正确复制
+                if hasattr(cond_block, 'block_id'):
+                    uncond_block.block_id = cond_block.block_id
+                # 无条件块指向条件块
+                uncond_block.cond_dit = cond_block
+                # 确保条件块的cond_dit为None
+                cond_block.cond_dit = None
 
     def load_state_dict(self, state_dict, strict=True):
         """重写load_state_dict方法"""
@@ -219,6 +232,9 @@ class CFM(nn.Module):
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
+        self.transformer.load_compression_strategies('method_cond.json',is_cond=True)
+        self.transformer_uncond.load_compression_strategies('method_uncond.json',is_cond = False)
+
         trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
 
         sampled = trajectory[-1]
@@ -228,6 +244,9 @@ class CFM(nn.Module):
         if exists(vocoder):
             out = out.permute(0, 2, 1)
             out = vocoder(out)
+
+        # self.transformer.save_compression_strategies('method_cond.json')
+        # self.transformer_uncond.save_compression_strategies('method_uncond.json')
 
         return out, trajectory
 

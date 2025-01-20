@@ -4,7 +4,7 @@ ref_audio = "infer/examples/basic/test_1.wav"
 # If an empty "", transcribes the reference audio automatically.
 ref_text = "吃什么？吃什么呀？有没有推荐的？"
 # 10字文本
-gen_text = "我是奶龙，我是奶龙，我是奶龙，我是奶龙，我是奶龙，我是奶龙。"
+gen_text = "我是奶龙，我是奶龙。"
 # File with text to generate. Ignores the text above.
 gen_file = ""
 remove_silence = false

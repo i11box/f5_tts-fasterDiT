@@ -132,30 +132,32 @@ class CompressManager:
 
     def __init__(self):
         self.compress_dict = {}
-        self.strategy = ['wars','ast','asc']
+        self.strategy = ['ast','asc','wars']
         self.cached_last_output = None
         self.cached_window_res = None
     
-    def compression_isok(a, b, delta):
+    def compression_compare(self,a, b):
         ls = []
         for ai, bi in zip(a, b):
             if isinstance(ai, torch.Tensor):
                 diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
                 l = diff.abs().clip(0, 10).mean()
                 ls.append(l)
-        return sum(ls) / len(ls) < delta
+        return sum(ls) / len(ls)
+    def compression_isok(self,a, b, delta,block_id):
+        return self.compression_compare(a, b) < delta * (block_id+1) / 3
     
     def record(self, strategy,t):
         """
         单个块内，记录各个时间步采用策略
         """
-        self.compress_dict.update({t:strategy})
+        self.compress_dict.update({f'{t.item():.3f}':strategy})
         
     def get_method(self, block_id,t):
         """
         获取指定时间步的压缩策略
         """
-        return self.compress_dict.get(block_id,{}).get(t, None)
+        return self.compress_dict.get(block_id,{}).get(f'{t.item():.3f}', 'none')
 
 # seed everything
 

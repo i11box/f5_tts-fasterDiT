@@ -757,15 +757,59 @@ class DiTBlock(nn.Module):
         self.ff = FeedForward(dim=dim, mult=ff_mult, dropout=dropout, approximate="tanh")
         self.compress_manager = CompressManager() #！记录压缩情况
         self.cond_dit = None #! 如果是无条件DiT，它将会指向有条件DiT对应块
+        self.cur_step = 0 #!当前时间步
 
     def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
         
         # pre-norm & modulation for attention input
         norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
 
+        logger = Logger()
+
         #！首先确认压缩方法
-        method = self.compress_manager.get_method(self.block_id,t)
-        method = 'none' #TODO:开始测试压缩策略后记得删
+        method = self.compress_manager.get_method(self.block_id,self.cur_step)
+        
+        #！测试搜索策略模式
+        #-----------------------------------
+        # #! 完整注意力计算（用于比较）
+        # attn_output = self.attn(x=norm, mask=mask, rope=rope)
+        
+        # #! 尝试各种策略
+        # strategy_outputs = {}
+        
+        # # 1. AST策略
+        # if self.compress_manager.cached_last_output is not None:
+        #     strategy_outputs['ast'] = self.compress_manager.cached_last_output
+            
+        # # 2. ASC策略
+        # if self.cond_dit is not None and self.cond_dit.compress_manager.cached_last_output is not None:
+        #     strategy_outputs['asc'] = self.cond_dit.compress_manager.cached_last_output
+            
+        # # 3. WARS策略
+        # window_attn = self.attn(x=norm, mask=mask, rope=rope, window_ratio=0.125)
+        # if self.compress_manager.cached_window_res is None:
+        #     # 首次计算残差并缓存
+        #     residual = attn_output - window_attn
+        #     self.compress_manager.cached_window_res = residual
+        #     strategy_outputs['wars'] = window_attn + residual
+        # else:
+        #     # 使用缓存的残差
+        #     strategy_outputs['wars'] = window_attn + self.compress_manager.cached_window_res
+            
+        # #! 按优先级尝试策略
+        # for strategy in self.compress_manager.strategy:
+        #     if strategy in strategy_outputs:
+        #         output = strategy_outputs[strategy]
+        #         if self.compress_manager.compression_isok(attn_output, output, delta=0.1, block_id=self.block_id):
+        #             attn_output = output
+        #             self.compress_manager.record(strategy, self.cur_step)
+        #             break
+        # else:  # 如果所有策略都不满足要求
+        #     self.compress_manager.record('none', self.cur_step)
+            
+        # #! 缓存当前输出用于AST
+        # self.compress_manager.cached_last_output = attn_output
+        #------------------------------------
         
         #! 若为时间步共享，直接读取上次输出
         if 'ast' in method:
@@ -793,7 +837,7 @@ class DiTBlock(nn.Module):
             else:
                 # 计算完整注意力
                 attn_output = self.attn(x=norm, mask=mask, rope=rope)
-
+        #-----------------------------------
         #! 缓存ast
         self.compress_manager.cached_last_output = attn_output
 
