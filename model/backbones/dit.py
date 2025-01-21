@@ -56,7 +56,8 @@ class TextEmbedding(nn.Module):
         text = F.pad(text, (0, seq_len - text_len), value=0)
 
         if drop_text:  # cfg for text
-            text = torch.zeros_like(text)
+            text[1:] = 0.0
+            # text = torch.zeros_like(text)
 
         text = self.text_embed(text)  # b n -> b n d
 
@@ -85,7 +86,8 @@ class InputEmbedding(nn.Module):
 
     def forward(self, x: float["b n d"], cond: float["b n d"], text_embed: float["b n d"], drop_audio_cond=False):  # noqa: F722
         if drop_audio_cond:  # cfg for cond audio
-            cond = torch.zeros_like(cond)
+            cond[1:] = 0.0
+            # cond = torch.zeros_like(cond)
 
         x = self.proj(torch.cat((x, cond, text_embed), dim=-1))
         x = self.conv_pos_embed(x) + x
@@ -146,6 +148,9 @@ class DiT(nn.Module):
         if time.ndim == 0:
             time = time.repeat(batch)
 
+        # 由于ASC的加入，输入变成了两倍，设置时间步的时候需要分开
+        t_single,_ = torch.chunk(time, 2)
+
         # t: conditioning time, c: context (text + masked cond audio), x: noised input audio
         t = self.time_embed(time)
         text_embed = self.text_embed(text, seq_len, drop_text=drop_text)
@@ -157,14 +162,14 @@ class DiT(nn.Module):
             residual = x
 
         for block in self.transformer_blocks:
-            block.cur_step = time
+            block.cur_step = t_single
             x = block(x, t, mask=mask, rope=rope)
 
         if self.long_skip_connection is not None:
             x = self.long_skip_connection(torch.cat((x, residual), dim=-1))
 
         x = self.norm_out(x, t)
-        output = self.proj_out(x)                                                                                                                                                  
+        output = self.proj_out(x)       
 
         return output
 
