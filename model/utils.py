@@ -132,8 +132,9 @@ class CompressManager:
 
     def __init__(self):
         self.compress_dict = {}
-        self.strategy = ['ast','asc','wars']
+        self.strategy = ['ast','asc-wars','wars','asc']
         self.cached_last_output = None
+        self.cached_uncond_output = None
         self.cached_window_res = None
     
     def compression_compare(self,a, b):
@@ -145,7 +146,7 @@ class CompressManager:
                 ls.append(l)
         return sum(ls) / len(ls)
     def compression_isok(self,a, b, delta,block_id):
-        return self.compression_compare(a, b) < delta * (block_id+1) / 3
+        return self.compression_compare(a, b) < delta * (block_id+1) / 22
     
     def record(self, strategy,t):
         """
@@ -153,14 +154,13 @@ class CompressManager:
         """
         self.compress_dict.update({f'{t.item():.3f}':strategy})
         
-    def get_method(self, block_id,t):
+    def get_method(self, t):
         """
         获取指定时间步的压缩策略
         """
         return self.compress_dict.get(f'{t.item():.3f}', 'none')
 
 # seed everything
-
 
 def seed_everything(seed=0):
     random.seed(seed)

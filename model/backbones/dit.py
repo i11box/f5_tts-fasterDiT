@@ -56,7 +56,7 @@ class TextEmbedding(nn.Module):
         text = F.pad(text, (0, seq_len - text_len), value=0)
 
         if drop_text:  # cfg for text
-            text[1:] = 0.0
+            text[1:] = 0.0 # 这里只有后一半进行丢弃，模拟无条件生成
             # text = torch.zeros_like(text)
 
         text = self.text_embed(text)  # b n -> b n d
@@ -86,7 +86,7 @@ class InputEmbedding(nn.Module):
 
     def forward(self, x: float["b n d"], cond: float["b n d"], text_embed: float["b n d"], drop_audio_cond=False):  # noqa: F722
         if drop_audio_cond:  # cfg for cond audio
-            cond[1:] = 0.0
+            cond[1:] = 0.0 # 这里只有后一半进行丢弃，模拟无条件生成
             # cond = torch.zeros_like(cond)
 
         x = self.proj(torch.cat((x, cond, text_embed), dim=-1))
@@ -207,26 +207,15 @@ class DiT(nn.Module):
         Returns:
             dict: 包含所有块的压缩策略信息
             {
-                'cond': {  # 条件DiT的策略
-                    block_id: {timestep: strategy}
-                },
-                'uncond': {  # 无条件DiT的策略
-                    block_id: {timestep: strategy}
-                }
+                block_id: {timestep: strategy}
             }
         """
-        strategies = {
-            'cond': {},
-            'uncond': {}
-        }
+        strategies = {}
         
-        # 收集条件DiT的策略
+        # 收集DiT的策略
         for block in self.transformer_blocks:
             if block.block_id is not None:
-                if block.cond_dit is None:
-                    strategies['cond'][block.block_id] = block.compress_manager.compress_dict
-                else:
-                    strategies['uncond'][block.block_id] = block.compress_manager.compress_dict
+                strategies[block.block_id] = block.compress_manager.compress_dict
 
                     
         return strategies
@@ -234,36 +223,32 @@ class DiT(nn.Module):
     def print_compression_summary(self):
         """打印压缩策略的统计信息"""
         strategies = self.collect_compression_strategies()
+                
+        print(f"\n{dit_type.upper()} DiT压缩策略统计:")
+        total_steps = 0
+        strategy_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0,'asc-wars':0}
         
-        for dit_type in ['cond', 'uncond']:
-            if not strategies[dit_type]:
-                continue
-                
-            print(f"\n{dit_type.upper()} DiT压缩策略统计:")
-            total_steps = 0
-            strategy_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0}
+        for block_id, block_strategies in strategies.items():
+            print(f"\nBlock {block_id}:")
+            block_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0,'asc-wars':0}
             
-            for block_id, block_strategies in strategies[dit_type].items():
-                print(f"\nBlock {block_id}:")
-                block_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0}
-                
-                for t, strategy in block_strategies.items():
-                    block_counts[strategy] += 1
-                    strategy_counts[strategy] += 1
-                    total_steps += 1
-                
-                # 打印每个块的统计
-                for strategy, count in block_counts.items():
-                    if count > 0:
-                        percentage = count / len(block_strategies) * 100
-                        print(f"  {strategy.upper()}: {count} steps ({percentage:.1f}%)")
+            for t, strategy in block_strategies.items():
+                block_counts[strategy] += 1
+                strategy_counts[strategy] += 1
+                total_steps += 1
             
-            # 打印总体统计
-            print(f"\n总体统计 (总时间步: {total_steps}):")
-            for strategy, count in strategy_counts.items():
+            # 打印每个块的统计
+            for strategy, count in block_counts.items():
                 if count > 0:
-                    percentage = count / total_steps * 100
-                    print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
+                    percentage = count / len(block_strategies) * 100
+                    print(f"  {strategy.upper()}: {count} steps ({percentage:.1f}%)")
+        
+        # 打印总体统计
+        print(f"\n总体统计 (总时间步: {total_steps}):")
+        for strategy, count in strategy_counts.items():
+            if count > 0:
+                percentage = count / total_steps * 100
+                print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
                     
     def save_compression_strategies(self,file_name:str = 'method.json'):
         """保存压缩策略到文件
@@ -286,29 +271,26 @@ class DiT(nn.Module):
         }
         
         # 计算统计信息
-        for dit_type in ['cond', 'uncond']:
-            if not strategies[dit_type]:
-                continue
                 
-            total_steps = 0
-            strategy_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0}
-            
-            for block_strategies in strategies[dit_type].values():
-                for strategy in block_strategies.values():
-                    strategy_counts[strategy] += 1
-                    total_steps += 1
-            
-            # 计算百分比
-            percentages = {
-                strategy: (count / total_steps * 100 if total_steps > 0 else 0)
-                for strategy, count in strategy_counts.items()
-            }
-            
-            save_data['statistics'][dit_type] = {
-                'total_steps': total_steps,
-                'strategy_counts': strategy_counts,
-                'strategy_percentages': percentages
-            }
+        total_steps = 0
+        strategy_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0,'asc-wars':0}
+        
+        for block_strategies in strategies.values():
+            for strategy in block_strategies.values():
+                strategy_counts[strategy] += 1
+                total_steps += 1
+        
+        # 计算百分比
+        percentages = {
+            strategy: (count / total_steps * 100 if total_steps > 0 else 0)
+            for strategy, count in strategy_counts.items()
+        }
+        
+        save_data['statistics'] = {
+            'total_steps': total_steps,
+            'strategy_counts': strategy_counts,
+            'strategy_percentages': percentages
+        }
         
         # 保存到文件
         with open(save_path, 'w', encoding='utf-8') as f:
@@ -316,7 +298,7 @@ class DiT(nn.Module):
             
         print(f"压缩策略已保存到: {save_path}")
         
-    def load_compression_strategies(self, load_path: str,is_cond :bool):
+    def load_compression_strategies(self, load_path: str):
         """从文件加载压缩策略
         
         Args:
@@ -332,27 +314,19 @@ class DiT(nn.Module):
         strategies = data['strategies']
         
         # 更新条件DiT的策略
-        if is_cond:
-            for block_id, block_strategies in strategies['cond'].items():
-                for block in self.transformer_blocks:
-                    if block.block_id == int(block_id):  # JSON的键都是字符串
-                        block.compress_manager.compress_dict = block_strategies
-        else:
-            # 更新无条件DiT的策略
-            for block_id, block_strategies in strategies['uncond'].items():
-                for block in self.transformer_blocks:
-                    if block.block_id == int(block_id):
-                        block.compress_manager.compress_dict = block_strategies
+        for block_id, block_strategies in strategies.items():
+            for block in self.transformer_blocks:
+                if block.block_id == int(block_id):  # JSON的键都是字符串
+                    block.compress_manager.compress_dict = block_strategies
                         
         print(f"已从 {load_path} 加载压缩策略")
         print("\n策略统计信息:")
-        for dit_type, stats in data['statistics'].items():
-            print(f"\n{dit_type.upper()} DiT:")
-            print(f"总时间步: {stats['total_steps']}")
-            for strategy, percentage in stats['strategy_percentages'].items():
-                count = stats['strategy_counts'][strategy]
-                if count > 0:
-                    print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
+        stats = data['statistics']
+        print(f"总时间步: {stats['total_steps']}")
+        for strategy, percentage in stats['strategy_percentages'].items():
+            count = stats['strategy_counts'][strategy]
+            if count > 0:
+                print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
     
     def set_all_block_id(self):
         cnt = 0

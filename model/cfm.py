@@ -66,7 +66,6 @@ class CFM(nn.Module):
 
         # transformer
         self.transformer = transformer
-        self.transformer_uncond = None  # 初始化为None
         dim = transformer.dim
         self.dim = dim
 
@@ -79,30 +78,10 @@ class CFM(nn.Module):
         # vocab map for tokenization
         self.vocab_char_map = vocab_char_map
 
-    def _create_uncond_transformer(self):
-        """创建并设置无条件transformer"""
-        if self.transformer_uncond is None:
-            self.transformer_uncond = copy.deepcopy(self.transformer)
-            # 复制权重
-            self.transformer_uncond.load_state_dict(self.transformer.state_dict())
-            
-            # 设置条件和无条件块的引用关系
-            for i, uncond_block in enumerate(self.transformer_uncond.transformer_blocks):
-                cond_block = self.transformer.transformer_blocks[i]
-                # 确保block_id被正确复制
-                if hasattr(cond_block, 'block_id'):
-                    uncond_block.block_id = cond_block.block_id
-                # 无条件块指向条件块
-                uncond_block.cond_dit = cond_block
-                # 确保条件块的cond_dit为None
-                cond_block.cond_dit = None
-
     def load_state_dict(self, state_dict, strict=True):
         """重写load_state_dict方法"""
         # 先加载条件模型的权重
         super().load_state_dict(state_dict, strict=strict)
-        # 然后创建无条件模型
-        self._create_uncond_transformer()
 
     @property
     def device(self):
@@ -129,7 +108,6 @@ class CFM(nn.Module):
     ):
         self.eval()
         # raw wave
-        self._create_uncond_transformer()
         if cond.ndim == 2: 
             cond = self.mel_spec(cond)
             cond = cond.permute(0, 2, 1)
@@ -187,11 +165,6 @@ class CFM(nn.Module):
         if no_ref_audio:
             cond = torch.zeros_like(cond)
 
-        # 设置条件块的引用
-        for i, uncond_block in enumerate(self.transformer_uncond.transformer_blocks):
-            cond_block = self.transformer.transformer_blocks[i]
-            uncond_block.cond_dit = cond_block
-
         # neural ode
 
         def fn(t, x, step_cond, text):
@@ -206,9 +179,6 @@ class CFM(nn.Module):
             if cfg_strength < 1e-5:
                 return pred
 
-            # null_pred = self.transformer_uncond(
-                # x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
-            # )
             return pred + (pred - null_pred) * cfg_strength
 
         # noise input
@@ -234,12 +204,9 @@ class CFM(nn.Module):
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
         self.transformer.set_all_block_id()
-        self.transformer_uncond.set_all_block_id()
         #-----------加载策略文件时取消注释--------------
-        # self.transformer.load_compression_strategies('method_cond_0.15.json',is_cond=True)
-        # self.transformer_uncond.load_compression_strategies('method_uncond_0.15.json',is_cond = False)
+        self.transformer.load_compression_strategies('method_0.4.json')
         #---------------------------------------------------------
-        # trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
         trajectory = odeint(
                 lambda t, x: fn(t, x, step_cond, text),
                 y0,
@@ -257,8 +224,9 @@ class CFM(nn.Module):
             out = out.permute(0, 2, 1)
             out = vocoder(out)
 
-        # self.transformer.save_compression_strategies('method_cond_0.15.json')
-        # self.transformer_uncond.save_compression_strategies('method_uncond_0.15.json')
+        #-----------保存策略文件时取消注释--------------
+        # self.transformer.save_compression_strategies('method_0.4.json')
+        #---------------------------------------------------------
 
         return out, trajectory
 
