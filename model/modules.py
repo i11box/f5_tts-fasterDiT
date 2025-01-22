@@ -756,7 +756,6 @@ class DiTBlock(nn.Module):
         self.ff_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff = FeedForward(dim=dim, mult=ff_mult, dropout=dropout, approximate="tanh")
         self.compress_manager = CompressManager() #！记录压缩情况
-        self.cond_dit = None #! 如果是无条件DiT，它将会指向有条件DiT对应块
         self.cur_step = 0 #!当前时间步
 
     def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
@@ -765,11 +764,11 @@ class DiTBlock(nn.Module):
         norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
 
         #！首先确认压缩方法
-        method = self.compress_manager.get_method(self.block_id,self.cur_step)
+        method = self.compress_manager.get_method(self.cur_step)
         
         #！测试搜索策略模式
         #-----------------------------------
-        # #! 完整注意力计算（用于比较）
+        #! 完整注意力计算（用于比较）
         # attn_output = self.attn(x=norm, mask=mask, rope=rope)
         
         # #! 尝试各种策略
@@ -780,8 +779,11 @@ class DiTBlock(nn.Module):
         #     strategy_outputs['ast'] = self.compress_manager.cached_last_output
             
         # # 2. ASC策略
-        # if self.cond_dit is not None and self.cond_dit.compress_manager.cached_last_output is not None:
-        #     strategy_outputs['asc'] = self.cond_dit.compress_manager.cached_last_output
+        # # 先算无条件
+        # _,norm_uncond = norm.chunk(2, dim=0)
+        # asc_attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope)
+        # asc_attn_output = torch.cat([asc_attn_output_uncond,asc_attn_output_uncond], dim=0)
+        # strategy_outputs['asc'] = asc_attn_output
             
         # # 3. WARS策略
         # window_attn = self.attn(x=norm, mask=mask, rope=rope, window_ratio=0.125)
@@ -793,20 +795,46 @@ class DiTBlock(nn.Module):
         # else:
         #     # 使用缓存的残差
         #     strategy_outputs['wars'] = window_attn + self.compress_manager.cached_window_res
-            
+
+        # # 4. ASC-WARS策略
+        # _,norm_uncond = norm.chunk(2, dim=0)
+        # asc_attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125)
+        # asc_window_attn = torch.cat([asc_attn_output_uncond,asc_attn_output_uncond], dim=0)
+        # if self.compress_manager.cached_window_res is None:
+        #     # 首次计算残差并缓存
+        #     residual = attn_output - asc_window_attn
+        #     self.compress_manager.cached_window_res = residual
+        #     strategy_outputs['asc-wars'] = asc_window_attn + residual
+        # else:
+        #     # 使用缓存的残差
+        #     strategy_outputs['asc-wars'] = asc_window_attn + self.compress_manager.cached_window_res
+
+        # # 计算原始完整输出
+        # orig_x = x + gate_msa.unsqueeze(1) * attn_output
+        # orig_norm = self.ff_norm(orig_x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+        # orig_ff_output = self.ff(orig_norm)
+        # orig_complete = orig_x + gate_mlp.unsqueeze(1) * orig_ff_output
+
         # #! 按优先级尝试策略
         # for strategy in self.compress_manager.strategy:
         #     if strategy in strategy_outputs:
-        #         output = strategy_outputs[strategy]
-        #         if self.compress_manager.compression_isok(attn_output, output, delta=0.15, block_id=self.block_id):
-        #             attn_output = output
+        #         compressed_attn = strategy_outputs[strategy]
+        #         # 使用压缩后的attention输出计算完整输出
+        #         compressed_x = x + gate_msa.unsqueeze(1) * compressed_attn
+        #         compressed_norm = self.ff_norm(compressed_x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+        #         compressed_ff_output = self.ff(compressed_norm)
+        #         compressed_complete = compressed_x + gate_mlp.unsqueeze(1) * compressed_ff_output
+                
+        #         if self.compress_manager.compression_isok(orig_complete, compressed_complete, delta=0.4, block_id=self.block_id):
         #             self.compress_manager.record(strategy, self.cur_step)
+        #             self.compress_manager.cached_last_output = attn_output
+        #             x = compressed_complete
         #             break
         # else:  # 如果所有策略都不满足要求
         #     self.compress_manager.record('none', self.cur_step)
-            
-        # #! 缓存当前输出用于AST
-        # self.compress_manager.cached_last_output = attn_output
+        #     self.compress_manager.cached_last_output = attn_output
+        #     x = orig_complete
+        
         #------------------------------------
         
         #! 若为时间步共享，直接读取上次输出
@@ -814,28 +842,30 @@ class DiTBlock(nn.Module):
             attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
 
         #! 若为条件间的共享
-        elif 'asc' in method:
-            attn_output = self.cond_dit.compress_manager.cached_last_output if self.cond_dit.compress_manager.cached_last_output is not None else x
+        if 'asc' in method:
+            # 先算无条件
+            _,norm_uncond = norm.chunk(2, dim=0)
+            attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope)
+            attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
 
         #! 需要计算完整注意力的情况
-        else:
-            if 'wars' in method:
-                #! 计算窗口注意力
-                window_attn = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125)
-                #! 目前没有窗口残差缓存
-                if self.compress_manager.cached_window_res is None:
-                    # 计算完整注意力
+        if 'wars' in method:
+            #! 计算窗口注意力
+            window_attn = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125)
+            #! 目前没有窗口残差缓存
+            if self.compress_manager.cached_window_res is None:
+                # 计算完整注意力，如果没有asc
+                if 'asc' not in method:
                     attn_output = self.attn(x=norm, mask=mask, rope=rope)
-                    # 计算并缓存残差
-                    residual = attn_output - window_attn
-                    self.compress_manager.cached_window_res = residual
-                else:
-                    # 使用缓存的残差
-                    attn_output = window_attn + self.compress_manager.cached_window_res
+                # 计算并缓存残差
+                residual = attn_output - window_attn
+                self.compress_manager.cached_window_res = residual
             else:
-                # 计算完整注意力
-                attn_output = self.attn(x=norm, mask=mask, rope=rope)
-        #-----------------------------------
+                # 使用缓存的残差
+                attn_output = window_attn + self.compress_manager.cached_window_res
+        if 'none' in method:
+            attn_output = self.attn(x=norm, mask=mask, rope=rope)
+        
         #! 缓存ast
         self.compress_manager.cached_last_output = attn_output
 
@@ -845,7 +875,7 @@ class DiTBlock(nn.Module):
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         ff_output = self.ff(norm)
         x = x + gate_mlp.unsqueeze(1) * ff_output
-
+        #-----------------------------------
         return x
 
 

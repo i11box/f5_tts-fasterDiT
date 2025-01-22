@@ -3,13 +3,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def plot_strategy_heatmap(json_file):
+def plot_strategy_heatmap(json_file,delta=0.1):
     # 读取JSON文件
     with open(json_file, 'r') as f:
         data = json.load(f)
     
     # 获取条件模型的策略
-    strategy_dict = data['strategies']['cond']
+    strategy_dict = data['strategies']
     
     # 获取所有块ID和时间步
     block_ids = sorted([int(bid) for bid in strategy_dict.keys()])
@@ -20,7 +20,7 @@ def plot_strategy_heatmap(json_file):
     strategy_matrix = np.zeros((len(timesteps), len(block_ids)), dtype=int)
     
     # 固定的策略到数字的映射
-    strategies = ['none', 'ast', 'asc', 'wars']
+    strategies = ['none', 'ast', 'asc', 'wars','asc-wars']
     strategy_to_num = {strategy: i for i, strategy in enumerate(strategies)}
     
     # 填充策略矩阵
@@ -39,7 +39,8 @@ def plot_strategy_heatmap(json_file):
         '#F5F9FF',  # 最浅的蓝色 (none)
         '#99C7FF',  # 浅蓝色 (ast)
         '#3388FF',  # 中蓝色 (asc)
-        '#0066FF'   # 深蓝色 (wars)
+        '#0066FF',   # 深蓝色 (wars)
+        '#0000FF'   # 最深的蓝色 (asc-wars)
     ]
     cmap = plt.cm.colors.ListedColormap(colors)
     
@@ -71,10 +72,12 @@ def plot_strategy_heatmap(json_file):
     plt.tight_layout()
     
     # 保存图片
-    plt.show()
+    output_filename = f'strategy_heatmap_{delta:.2f}.png'
+    plt.savefig(output_filename)
     plt.close()
 
 # 使用示例
 if __name__ == '__main__':
     # 绘制条件模型的策略热力图
-    plot_strategy_heatmap('model/backbones/method_cond_0.2.json')
+    for delta in [0.1,0.15,0.2,0.25,0.3,0.35,0.4]:
+        plot_strategy_heatmap('model/backbones/method_' + str(delta) + '.json',delta)
