@@ -337,3 +337,4 @@ class DiT(nn.Module):
     def set_all_block_no_method(self):
         for block in self.transformer_blocks:
             block.compress_manager.compress_dict = {}
+    

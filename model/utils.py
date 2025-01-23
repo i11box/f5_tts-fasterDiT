@@ -136,17 +136,7 @@ class CompressManager:
         self.cached_last_output = None
         self.cached_uncond_output = None
         self.cached_window_res = None
-    
-    def compression_compare(self,a, b):
-        ls = []
-        for ai, bi in zip(a, b):
-            if isinstance(ai, torch.Tensor):
-                diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
-                l = diff.abs().clip(0, 10).mean()
-                ls.append(l)
-        return sum(ls) / len(ls)
-    def compression_isok(self,a, b, delta,block_id):
-        return self.compression_compare(a, b) < delta * (block_id+1) / 22
+        self.need_cal_window_res = [] # 记录需要计算窗口残差的时间步
     
     def record(self, strategy,t):
         """
@@ -159,6 +149,38 @@ class CompressManager:
         获取指定时间步的压缩策略
         """
         return self.compress_dict.get(f'{t.item():.3f}', 'none')
+    
+    def get_need_cal_window_res(self):
+        """
+        使用双指针方法计算需要计算窗口残差的时间步
+        - i指针指向当前检查的none策略
+        - j指针向后扫描寻找wars或下一个none
+        """
+        self.need_cal_window_res = []
+        steps = sorted(float(step) for step in self.compress_dict.keys())
+        
+        i = 0
+        while i < len(steps):
+            current_strategy = self.compress_dict[f'{steps[i]:.3f}']
+            
+            if 'none' in current_strategy:
+                j = i + 1
+                while j < len(steps):
+                    next_strategy = self.compress_dict[f'{steps[j]:.3f}']
+                    if 'wars' in next_strategy:
+                        self.need_cal_window_res.append(f'{steps[i]:.3f}')
+                        # 找到wars后，直接跳到下一个位置继续搜索
+                        break
+                    if 'none' in next_strategy:
+                        # 找到下一个none，从这里开始新的搜索
+                        break
+                    j += 1
+                # j之前的都已经处理过了
+                i = j
+            else:
+                i += 1
+        
+        return self.need_cal_window_res
 
 # seed everything
 

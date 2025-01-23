@@ -30,8 +30,6 @@ from f5_tts.model.utils import (
     list_str_to_tensor,
     mask_from_frac_lengths,
 )
-from f5_tts.model.logger import Logger
-
 
 class CFM(nn.Module):
     def __init__(
@@ -205,7 +203,7 @@ class CFM(nn.Module):
 
         self.transformer.set_all_block_id()
         #-----------加载策略文件时取消注释--------------
-        self.transformer.load_compression_strategies('method_0.4.json')
+        # self.transformer.load_compression_strategies('method_0.4.json')
         #---------------------------------------------------------
         trajectory = odeint(
                 lambda t, x: fn(t, x, step_cond, text),
@@ -225,10 +223,139 @@ class CFM(nn.Module):
             out = vocoder(out)
 
         #-----------保存策略文件时取消注释--------------
-        # self.transformer.save_compression_strategies('method_0.4.json')
+        self.transformer.save_compression_strategies('method_0.4.json')
         #---------------------------------------------------------
 
         return out, trajectory
+
+    # 校准
+    @torch.no_grad()
+    def cabibrate(self,
+        cond: float["b n d"] | float["b nw"],  # noqa: F722
+        text: int["b nt"] | list[str],  # noqa: F722
+        duration: int | int["b"],  # noqa: F821
+        *,
+        lens: int["b"] | None = None,  # noqa: F821
+        steps=32,
+        sway_sampling_coef=None,
+        seed: int | None = None,
+        max_duration=4096,
+        no_ref_audio=False,
+        edit_mask=None,
+    ):
+        self.eval()
+        # raw wave
+        if cond.ndim == 2: 
+            cond = self.mel_spec(cond)
+            cond = cond.permute(0, 2, 1)
+            assert cond.shape[-1] == self.num_channels
+
+        cond = cond.to(next(self.parameters()).dtype)
+
+        batch, cond_seq_len, device = *cond.shape[:2], cond.device
+        if not exists(lens):
+            lens = torch.full((batch,), cond_seq_len, device=device, dtype=torch.long)
+
+        # text
+
+        if isinstance(text, list):
+            if exists(self.vocab_char_map):
+                text = list_str_to_idx(text, self.vocab_char_map).to(device)
+            else:
+                text = list_str_to_tensor(text).to(device)
+            assert text.shape[0] == batch
+
+        if exists(text):
+            text_lens = (text != -1).sum(dim=-1)
+            lens = torch.maximum(text_lens, lens)  # make sure lengths are at least those of the text characters
+
+        # duration
+
+        cond_mask = lens_to_mask(lens)
+        if edit_mask is not None:
+            cond_mask = cond_mask & edit_mask
+
+        if isinstance(duration, int):
+            duration = torch.full((batch,), duration, device=device, dtype=torch.long)
+
+        duration = torch.maximum(lens + 1, duration)  # just add one token so something is generated
+        duration = duration.clamp(max=max_duration)
+        max_duration = duration.amax()
+
+        cond = F.pad(cond, (0, 0, 0, max_duration - cond_seq_len), value=0.0)
+        cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
+        cond_mask = cond_mask.unsqueeze(-1)
+        step_cond = torch.where(
+            cond_mask, cond, torch.zeros_like(cond)
+        )  # allow direct control (cut cond audio) with lens passed in
+
+        if batch > 1:
+            mask = lens_to_mask(duration)
+        else:  # save memory and speed up, as single inference need no mask currently
+            mask = None
+
+        # test for no ref audio
+        if no_ref_audio:
+            cond = torch.zeros_like(cond)
+
+        # neural ode
+
+        # def fn(t, x, step_cond, text):
+        #     # at each step, conditioning is fixed
+
+        #     # predict flow
+        #     x, step_cond, text = x.repeat(2, 1, 1), step_cond.repeat(2, 1, 1), text.repeat(2, 1)
+        #     pred = self.transformer(
+        #         x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
+        #     )
+        #     pred, null_pred = pred.chunk(2)
+        #     if cfg_strength < 1e-5:
+        #         return pred
+
+        #     return pred + (pred - null_pred) * cfg_strength
+
+        # noise input
+        # to make sure batch inference result is same with different batch size, and for sure single inference
+        # still some difference maybe due to convolutional layers
+        y0 = []
+        for dur in duration:
+            if exists(seed):
+                torch.manual_seed(seed)
+            y0.append(torch.randn(dur, self.num_channels, device=self.device, dtype=step_cond.dtype))
+        y0 = pad_sequence(y0, padding_value=0, batch_first=True)
+
+        t_start = 0
+
+        t = torch.linspace(t_start, 1, steps, device=self.device, dtype=step_cond.dtype)
+        if sway_sampling_coef is not None:
+            t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+
+        self.transformer.set_all_block_id()
+
+        # 校准模式下，首先计算不用策略的完整输出
+        pred_no_speedup = self.transformer(
+                x=y0, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
+        )
+
+        # 遍历各种策略
+        
+
+        #-----------保存策略文件时取消注释--------------
+        self.transformer.save_compression_strategies('method_0.4.json')
+        #---------------------------------------------------------
+        pass
+
+    def _compression_compare(self,a, b):
+        ls = []
+        for ai, bi in zip(a, b):
+            if isinstance(ai, torch.Tensor):
+                diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
+                l = diff.abs().clip(0, 10).mean()
+                ls.append(l)
+        return sum(ls) / len(ls)
+    
+    def _compression_isok(self,a, b, delta,block_id):
+        return self.compression_compare(a, b) < delta * (block_id+1) / 22
 
     def forward(
         self,
