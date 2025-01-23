@@ -92,9 +92,12 @@ def plot_strategy_heatmap(json_file, delta, ax):
     ax.set_ylabel('Timestep')
     ax.set_title(f'Strategy Distribution (delta={delta:.2f})')
 
-def plot_speedup_curves(text_length, ax):
+def plot_speedup_curves(text_length, save_path=None):
     data = FLOPS_DATA_10 if text_length == 10 else FLOPS_DATA_70
     base = BASE_FLOPS_10 if text_length == 10 else BASE_FLOPS_70
+    
+    fig = plt.figure(figsize=(10, 6))
+    ax = plt.gca()
     
     deltas = sorted(data.keys())
     speedups_total = [base['total_gflops'] / data[d]['total_gflops'] for d in deltas]
@@ -119,13 +122,16 @@ def plot_speedup_curves(text_length, ax):
     # 可选：美化x轴刻度
     ax.set_xticks(deltas)
     ax.set_xticklabels([f'{d:.2f}' for d in deltas])
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path)
+        plt.close()
+    else:
+        plt.show()
 
 if __name__ == '__main__':
-    deltas = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
-    for delta in deltas:
-        for text_length in [10, 70]:
-            json_file = 'model/backbones/method_' + str(delta) + '.json'
-            if os.path.exists(json_file):
-                plot_combined_analysis(json_file, delta, text_length)
-            else:
-                print(f"File not found: {json_file}")
+    for text_length in [10, 70]:
+        save_path = f'speedup_analysis_{text_length}chars.png'
+        plot_speedup_curves(text_length, save_path)
