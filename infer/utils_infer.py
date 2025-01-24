@@ -371,6 +371,8 @@ def infer_process(
     speed=speed,
     fix_duration=fix_duration,
     device=device,
+    calibration_mode=False,
+    delta=0.1
 ):
     # Split the input text into batches
     audio, sr = torchaudio.load(ref_audio)
@@ -396,6 +398,8 @@ def infer_process(
         speed=speed,
         fix_duration=fix_duration,
         device=device,
+        calibration_mode=calibration_mode,
+        delta=delta,
     )
 
 
@@ -418,6 +422,8 @@ def infer_batch_process(
     speed=1,
     fix_duration=None,
     device=None,
+    calibration_mode=False,  
+    delta=0.1,  
 ):
     audio, sr = ref_audio
     if audio.shape[0] > 1:
@@ -452,6 +458,19 @@ def infer_batch_process(
 
         # inference
         with torch.inference_mode():
+            if calibration_mode:
+                # 如果是校准模式，调用calibrate方法
+                model_obj.cabibrate(
+                    cond=audio,
+                    text=final_text_list,
+                    duration=duration,
+                    steps=nfe_step,
+                    sway_sampling_coef=sway_sampling_coef,
+                    delta=delta
+                )
+                print(f"校准完成，压缩策略已保存到method_{delta}.json")
+                return None, None, None
+            
             generated, _ = model_obj.sample(
                 cond=audio,
                 text=final_text_list,

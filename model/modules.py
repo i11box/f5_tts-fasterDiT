@@ -763,6 +763,9 @@ class DiTBlock(nn.Module):
         # pre-norm & modulation for attention input
         norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
 
+        # for key in self.compress_manager.compress_dict.keys():
+        #     print(key)
+
         #！首先确认压缩方法
         method = self.compress_manager.get_method(self.cur_step)
         
@@ -775,6 +778,11 @@ class DiTBlock(nn.Module):
             # 先算无条件
             _,norm_uncond = norm.chunk(2, dim=0)
             attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope)
+            # 如果需要计算窗口残差
+            if self.compress_manager.is_need_cal_res(self.cur_step):
+                window_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125)
+                residual_uncond = attn_output_uncond - window_output_uncond
+                self.compress_manager.cached_window_res = torch.cat([residual_uncond,residual_uncond], dim=0)
             attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
 
         #! 需要计算完整注意力的情况
@@ -794,6 +802,13 @@ class DiTBlock(nn.Module):
                 attn_output = window_attn + self.compress_manager.cached_window_res
         if 'none' in method:
             attn_output = self.attn(x=norm, mask=mask, rope=rope)
+            # 判断当前时间步是否需要计算残差
+            if self.compress_manager.is_need_cal_res(self.cur_step):
+                # 计算残差
+                window_attn = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125)
+                residual = attn_output - window_attn
+                # 缓存残差
+                self.compress_manager.cached_window_res = residual
         
         #! 缓存ast
         self.compress_manager.cached_last_output = attn_output

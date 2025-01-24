@@ -19,6 +19,7 @@ import copy
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
+from tqdm import tqdm
 
 from f5_tts.model.backbones.dit import DiT
 from f5_tts.model.modules import MelSpec
@@ -223,7 +224,7 @@ class CFM(nn.Module):
             out = vocoder(out)
 
         #-----------保存策略文件时取消注释--------------
-        self.transformer.save_compression_strategies('method_0.4.json')
+        #self.transformer.save_compression_strategies('method_0.4.json')
         #---------------------------------------------------------
 
         return out, trajectory
@@ -236,12 +237,13 @@ class CFM(nn.Module):
         duration: int | int["b"],  # noqa: F821
         *,
         lens: int["b"] | None = None,  # noqa: F821
-        steps=32,
+        steps=2,
         sway_sampling_coef=None,
         seed: int | None = None,
         max_duration=4096,
         no_ref_audio=False,
         edit_mask=None,
+        delta = 0.1 # 压缩阈值
     ):
         self.eval()
         # raw wave
@@ -298,25 +300,6 @@ class CFM(nn.Module):
         if no_ref_audio:
             cond = torch.zeros_like(cond)
 
-        # neural ode
-
-        # def fn(t, x, step_cond, text):
-        #     # at each step, conditioning is fixed
-
-        #     # predict flow
-        #     x, step_cond, text = x.repeat(2, 1, 1), step_cond.repeat(2, 1, 1), text.repeat(2, 1)
-        #     pred = self.transformer(
-        #         x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
-        #     )
-        #     pred, null_pred = pred.chunk(2)
-        #     if cfg_strength < 1e-5:
-        #         return pred
-
-        #     return pred + (pred - null_pred) * cfg_strength
-
-        # noise input
-        # to make sure batch inference result is same with different batch size, and for sure single inference
-        # still some difference maybe due to convolutional layers
         y0 = []
         for dur in duration:
             if exists(seed):
@@ -332,18 +315,63 @@ class CFM(nn.Module):
 
         self.transformer.set_all_block_id()
 
+        # 复制输出
+        y0_rep = y0.repeat(2, 1, 1)
+        step_cond_rep = step_cond.repeat(2, 1, 1)
+        text_rep = text.repeat(2, 1)
+
+        # 遍历各个时间步和各个块，挑选方法，首先初始化压缩策略
+        method_dict = {
+            str(block_id): {
+                f"{t[i].item():.3f}": "none" for i in range(len(t))
+            } for block_id in range(len(self.transformer.transformer_blocks))
+        }
+
         # 校准模式下，首先计算不用策略的完整输出
-        pred_no_speedup = self.transformer(
-                x=y0, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
-        )
+        self.transformer.load_compression_strategies(method_dict)
+        self.transformer.set_all_block_need_cal_window_res()
+        pred_no_speedups = {}
+
+        for t_step in t[1:]: # 第一个时间步总是none
+            pred_no_speedup = self.transformer(
+                    x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
+            )
+            pred_no_speedups[f'{t_step.item():.3f}'] = pred_no_speedup # 收集各个时间步的输出
+        
+        method_candidate = ['ast','asc-wars','wars','asc']
 
         # 遍历各种策略
-        
+        total_steps = len(t[1:]) * len(self.transformer.transformer_blocks) * len(method_candidate)
+        with tqdm(total=total_steps, desc="Searching compression strategies") as pbar:
+            for t_step in t[1:]: # 第一个时间步总是none
+                for block_id in range(len(self.transformer.transformer_blocks)):
+                    for method in method_candidate:
+                        # 更新进度条描述
+                        pbar.set_description(f"t={t_step.item():.3f}, block={block_id}, trying {method}")
+                        
+                        # 重置所有缓存
+                        self._reset_compress_manager()
+                        # 尝试方法
+                        if f'{t_step.item():.3f}' in method_dict[str(block_id)]:
+                            method_dict[str(block_id)][f'{t_step.item():.3f}'] = method
+                        self.transformer.load_compression_strategies(method_dict)
+                        self.transformer.set_all_block_need_cal_window_res()
+                        # 当前输出
+                        pred_speedup = self.transformer(
+                                x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
+                        )
+                        # 比较输出是否可行
+                        if self._compression_isok(pred_no_speedups[f'{t_step.item():.3f}'], pred_speedup, delta, block_id):
+                            pbar.update(len(method_candidate) - method_candidate.index(method))  # 跳过剩余的方法
+                            break
+                        pbar.update(1)
 
-        #-----------保存策略文件时取消注释--------------
-        self.transformer.save_compression_strategies('method_0.4.json')
-        #---------------------------------------------------------
-        pass
+        # 保存策略
+        with open(os.path.join('method' + str(delta) + '.json'), "w") as f:
+            import json
+            json.dump(method_dict, f, indent=4)
+            
+        print("策略保存成功")
 
     def _compression_compare(self,a, b):
         ls = []
@@ -355,7 +383,12 @@ class CFM(nn.Module):
         return sum(ls) / len(ls)
     
     def _compression_isok(self,a, b, delta,block_id):
-        return self.compression_compare(a, b) < delta * (block_id+1) / 22
+        return self._compression_compare(a, b) < delta * (block_id+1) / len(self.transformer.transformer_blocks)
+
+    # 清空所有缓存
+    def _reset_compress_manager(self):
+        for block in self.transformer.transformer_blocks:
+            block.compress_manager.reset()
 
     def forward(
         self,

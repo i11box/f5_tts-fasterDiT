@@ -298,20 +298,26 @@ class DiT(nn.Module):
             
         print(f"压缩策略已保存到: {save_path}")
         
-    def load_compression_strategies(self, load_path: str):
+    def load_compression_strategies(self, load: str | dict):
         """从文件加载压缩策略
         
         Args:
-            load_path: 策略文件路径
+            load: 策略文件路径/已有策略字典
         """
-        # 获取项目根目录
-        project_root = os.path.dirname(os.path.abspath(__file__))
-        # 构建文件路径
-        load_path = os.path.join(project_root, load_path)
-        with open(load_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            
-        strategies = data['strategies']
+        strategies = {}
+        info_flag = False # 仅在加载dict时输出信息
+        # 如果load是路径
+        if isinstance(load, str) and os.path.isfile(load):
+            info_flag = True
+            # 获取项目根目录
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            # 构建文件路径
+            load = os.path.join(project_root, load)
+            with open(load, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                strategies = data['strategies']
+        else: # 如果是dict
+            strategies = load
         
         # 更新条件DiT的策略
         for block_id, block_strategies in strategies.items():
@@ -319,14 +325,15 @@ class DiT(nn.Module):
                 if block.block_id == int(block_id):  # JSON的键都是字符串
                     block.compress_manager.compress_dict = block_strategies
                         
-        print(f"已从 {load_path} 加载压缩策略")
-        print("\n策略统计信息:")
-        stats = data['statistics']
-        print(f"总时间步: {stats['total_steps']}")
-        for strategy, percentage in stats['strategy_percentages'].items():
-            count = stats['strategy_counts'][strategy]
-            if count > 0:
-                print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
+        if info_flag:
+            print(f"已从 {load} 加载压缩策略")
+            print("\n策略统计信息:")
+            stats = data['statistics']
+            print(f"总时间步: {stats['total_steps']}")
+            for strategy, percentage in stats['strategy_percentages'].items():
+                count = stats['strategy_counts'][strategy]
+                if count > 0:
+                    print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
     
     def set_all_block_id(self):
         cnt = 0
@@ -338,3 +345,6 @@ class DiT(nn.Module):
         for block in self.transformer_blocks:
             block.compress_manager.compress_dict = {}
     
+    def set_all_block_need_cal_window_res(self):
+        for block in self.transformer_blocks:
+            block.compress_manager.calibrate_all_cal_res()

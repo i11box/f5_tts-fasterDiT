@@ -136,7 +136,23 @@ class CompressManager:
         self.cached_last_output = None
         self.cached_uncond_output = None
         self.cached_window_res = None
-        self.need_cal_window_res = [] # 记录需要计算窗口残差的时间步
+        self.need_cal_window_res = {} # 记录需要计算窗口残差的时间步
+    
+    def reset(self): # 只重置缓存
+        self.cached_last_output = None
+        self.cached_uncond_output = None
+        self.cached_window_res = None
+    
+    def calibrate_all_cal_res(self):
+        self.need_cal_window_res = {
+            t: True for t in self.compress_dict.keys()
+        }
+    
+    def is_need_cal_res(self,t):
+        '''
+        判断当前时间步是否需要计算窗口残差
+        '''
+        return self.need_cal_window_res[f'{t.item():.3f}']
     
     def record(self, strategy,t):
         """
@@ -152,23 +168,28 @@ class CompressManager:
     
     def get_need_cal_window_res(self):
         """
-        使用双指针方法计算需要计算窗口残差的时间步
+        双指针计算需要计算窗口残差的时间步
         - i指针指向当前检查的none策略
         - j指针向后扫描寻找wars或下一个none
         """
-        self.need_cal_window_res = []
+        self.need_cal_window_res = {}
+        
+        if not self.compress_dict:
+            return self.need_cal_window_res
+        
         steps = sorted(float(step) for step in self.compress_dict.keys())
         
         i = 0
         while i < len(steps):
             current_strategy = self.compress_dict[f'{steps[i]:.3f}']
             
-            if 'none' in current_strategy:
+            # none和只计算asc的情况下都有可能需要计算窗口残差
+            if 'none' in current_strategy or 'asc' == current_strategy:
                 j = i + 1
                 while j < len(steps):
                     next_strategy = self.compress_dict[f'{steps[j]:.3f}']
                     if 'wars' in next_strategy:
-                        self.need_cal_window_res.append(f'{steps[i]:.3f}')
+                        self.need_cal_window_res[f'{steps[i]:.3f}'] = True
                         # 找到wars后，直接跳到下一个位置继续搜索
                         break
                     if 'none' in next_strategy:
