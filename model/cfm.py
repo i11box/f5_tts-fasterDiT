@@ -15,7 +15,9 @@ from typing import Callable
 
 import torch
 import torch.nn.functional as F
-import copy
+import os
+import json
+
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
@@ -204,7 +206,7 @@ class CFM(nn.Module):
 
         self.transformer.set_all_block_id()
         #-----------加载策略文件时取消注释--------------
-        # self.transformer.load_compression_strategies('method_0.4.json')
+        #self.transformer.load_compression_strategies('C:\\Users\\ASUS\\scoop\\apps\\python\\current\\Lib\\site-packages\\f5_tts\\method0.1.json')
         #---------------------------------------------------------
         trajectory = odeint(
                 lambda t, x: fn(t, x, step_cond, text),
@@ -360,15 +362,18 @@ class CFM(nn.Module):
                         pred_speedup = self.transformer(
                                 x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
                         )
+                        # 计算比较结果
+                        compare_result = self._compression_compare(pred_no_speedups[f'{t_step.item():.3f}'], pred_speedup)
+                        # 更新进度条描述，包含比较结果
+                        pbar.set_description(f"t={t_step.item():.3f}, block={block_id}, trying {method}, diff={compare_result:.6f}")
                         # 比较输出是否可行
-                        if self._compression_isok(pred_no_speedups[f'{t_step.item():.3f}'], pred_speedup, delta, block_id):
+                        if compare_result < delta * (block_id+1) / 22:
                             pbar.update(len(method_candidate) - method_candidate.index(method))  # 跳过剩余的方法
                             break
                         pbar.update(1)
 
         # 保存策略
         with open(os.path.join('method' + str(delta) + '.json'), "w") as f:
-            import json
             json.dump(method_dict, f, indent=4)
             
         print("策略保存成功")
@@ -380,7 +385,8 @@ class CFM(nn.Module):
                 diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
                 l = diff.abs().clip(0, 10).mean()
                 ls.append(l)
-        return sum(ls) / len(ls)
+        result = sum(ls) / len(ls)
+        return result
     
     def _compression_isok(self,a, b, delta,block_id):
         return self._compression_compare(a, b) < delta * (block_id+1) / len(self.transformer.transformer_blocks)

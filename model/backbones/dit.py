@@ -308,14 +308,15 @@ class DiT(nn.Module):
         info_flag = False # 仅在加载dict时输出信息
         # 如果load是路径
         if isinstance(load, str) and os.path.isfile(load):
-            info_flag = True
+            info_flag = False
             # 获取项目根目录
             project_root = os.path.dirname(os.path.abspath(__file__))
             # 构建文件路径
             load = os.path.join(project_root, load)
             with open(load, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                strategies = data['strategies']
+                # strategies = data['strategies']
+                strategies = data
         else: # 如果是dict
             strategies = load
         

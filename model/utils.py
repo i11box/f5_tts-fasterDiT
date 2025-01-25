@@ -143,16 +143,16 @@ class CompressManager:
         self.cached_uncond_output = None
         self.cached_window_res = None
     
-    def calibrate_all_cal_res(self):
+    def calibrate_all_cal_res(self,calibrate_mode = True):
         self.need_cal_window_res = {
-            t: True for t in self.compress_dict.keys()
+            t: True if calibrate_mode else False for t in self.compress_dict.keys()
         }
     
     def is_need_cal_res(self,t):
         '''
         判断当前时间步是否需要计算窗口残差
         '''
-        return self.need_cal_window_res[f'{t.item():.3f}']
+        return self.need_cal_window_res.get(f'{t.item():.3f}', False)
     
     def record(self, strategy,t):
         """
@@ -171,9 +171,7 @@ class CompressManager:
         双指针计算需要计算窗口残差的时间步
         - i指针指向当前检查的none策略
         - j指针向后扫描寻找wars或下一个none
-        """
-        self.need_cal_window_res = {}
-        
+        """        
         if not self.compress_dict:
             return self.need_cal_window_res
         

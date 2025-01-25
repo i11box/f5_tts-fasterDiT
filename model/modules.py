@@ -763,12 +763,11 @@ class DiTBlock(nn.Module):
         # pre-norm & modulation for attention input
         norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
 
-        # for key in self.compress_manager.compress_dict.keys():
-        #     print(key)
+        self.compress_manager.calibrate_all_cal_res(calibrate_mode = False)
 
         #！首先确认压缩方法
         method = self.compress_manager.get_method(self.cur_step)
-        
+                
         #! 若为时间步共享，直接读取上次输出
         if 'ast' in method:
             attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
