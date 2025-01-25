@@ -9,7 +9,7 @@ d - dimension
 
 from __future__ import annotations
 
-from logging import Logger
+
 from random import random
 from typing import Callable
 
@@ -17,6 +17,8 @@ import torch
 import torch.nn.functional as F
 import os
 import json
+import copy
+import wandb
 
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
@@ -32,6 +34,7 @@ from f5_tts.model.utils import (
     list_str_to_idx,
     list_str_to_tensor,
     mask_from_frac_lengths,
+    CompressStateContext
 )
 
 class CFM(nn.Module):
@@ -78,7 +81,10 @@ class CFM(nn.Module):
 
         # vocab map for tokenization
         self.vocab_char_map = vocab_char_map
-
+        
+        # Initialize wandb in offline mode
+        wandb.init(project="f5_tts_compression", mode="offline", dir="./wandb_logs")
+        
     def load_state_dict(self, state_dict, strict=True):
         """重写load_state_dict方法"""
         # 先加载条件模型的权重
@@ -328,50 +334,64 @@ class CFM(nn.Module):
                 f"{t[i].item():.3f}": "none" for i in range(len(t))
             } for block_id in range(len(self.transformer.transformer_blocks))
         }
-
-        # 校准模式下，首先计算不用策略的完整输出
-        self.transformer.load_compression_strategies(method_dict)
-        self.transformer.set_all_block_need_cal_window_res()
-        pred_no_speedups = {}
-
-        for t_step in t[1:]: # 第一个时间步总是none
-            pred_no_speedup = self.transformer(
-                    x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
-            )
-            pred_no_speedups[f'{t_step.item():.3f}'] = pred_no_speedup # 收集各个时间步的输出
+        none_method_dict = copy.deepcopy(method_dict) # 重置策略
+        method_candidate = ['ast','asc-wars','wars','asc','none']
+        # 先收集所有时间步的无压缩输出
+        output_nospeedup = {}
         
-        method_candidate = ['ast','asc-wars','wars','asc']
-
+        for t_step in t[1:]: # 第一个时间步总是none
+            self.transformer.load_compression_strategies(none_method_dict)
+            self._reset_compress_manager()
+            output_nospeedup[f'{t_step.item():.3f}'] = self.transformer(
+                x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, 
+                drop_audio_cond=True, drop_text=True
+            )
+        
+        # 对第一个时间步进行缓存，使得第二个时间步有机会用ast
+        self.transformer.set_all_block_need_cal_window_res()
+        self.transformer(
+                x=y0_rep, cond=step_cond_rep, text=text_rep, time=t[0], mask=mask, 
+                drop_audio_cond=True, drop_text=True
+            )
+        
         # 遍历各种策略
         total_steps = len(t[1:]) * len(self.transformer.transformer_blocks) * len(method_candidate)
         with tqdm(total=total_steps, desc="Searching compression strategies") as pbar:
             for t_step in t[1:]: # 第一个时间步总是none
                 for block_id in range(len(self.transformer.transformer_blocks)):
                     for method in method_candidate:
-                        # 更新进度条描述
-                        pbar.set_description(f"t={t_step.item():.3f}, block={block_id}, trying {method}")
-                        
-                        # 重置所有缓存
-                        self._reset_compress_manager()
-                        # 尝试方法
-                        if f'{t_step.item():.3f}' in method_dict[str(block_id)]:
+                        # 获取当前block及其compress_manager
+                        cur_block = self.transformer.transformer_blocks[block_id]
+                        with CompressStateContext(cur_block.compress_manager) as state:
+                            # 更新进度条描述
+                            pbar.set_description(f"t={t_step.item():.3f}, block={block_id}, trying {method}")
+                            
+                            # 尝试方法
                             method_dict[str(block_id)][f'{t_step.item():.3f}'] = method
-                        self.transformer.load_compression_strategies(method_dict)
-                        self.transformer.set_all_block_need_cal_window_res()
-                        # 当前输出
-                        pred_speedup = self.transformer(
-                                x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
-                        )
-                        # 计算比较结果
-                        compare_result = self._compression_compare(pred_no_speedups[f'{t_step.item():.3f}'], pred_speedup)
-                        # 更新进度条描述，包含比较结果
-                        pbar.set_description(f"t={t_step.item():.3f}, block={block_id}, trying {method}, diff={compare_result:.6f}")
-                        # 比较输出是否可行
-                        if compare_result < delta * (block_id+1) / 22:
-                            pbar.update(len(method_candidate) - method_candidate.index(method))  # 跳过剩余的方法
-                            break
-                        pbar.update(1)
-
+                            self.transformer.load_compression_strategies(method_dict)
+                            self.transformer.set_all_block_need_cal_window_res()
+                            # 当前输出
+                            pred_speedup = self.transformer(
+                                    x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
+                            )
+                            # 计算比较结果
+                            compare_result = self._compression_compare(output_nospeedup[f'{t_step.item():.3f}'], pred_speedup)
+                            # 记录日志到wandb
+                            wandb.log({
+                                "time_step": t_step.item(),
+                                "block_id": block_id, 
+                                "method": method,
+                                "diff": compare_result,
+                                "threshold": delta * (block_id+1) / 22
+                            })
+                            if compare_result < delta * (block_id+1) / 22:
+                                pbar.update(len(method_candidate) - method_candidate.index(method))  # 跳过剩余的方法
+                                state.mark_success()
+                                break
+                            pbar.update(1)
+                    else:
+                        method_dict[str(block_id)][f'{t_step.item():.3f}'] = 'none'
+                        
         # 保存策略
         with open(os.path.join('method' + str(delta) + '.json'), "w") as f:
             json.dump(method_dict, f, indent=4)

@@ -763,7 +763,7 @@ class DiTBlock(nn.Module):
         # pre-norm & modulation for attention input
         norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
 
-        self.compress_manager.calibrate_all_cal_res(calibrate_mode = False)
+        self.compress_manager.calibrate_all_cal_res(calibrate_mode = True)
 
         #！首先确认压缩方法
         method = self.compress_manager.get_method(self.cur_step)
