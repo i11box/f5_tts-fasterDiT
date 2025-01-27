@@ -460,7 +460,7 @@ def infer_batch_process(
         with torch.inference_mode():
             if calibration_mode:
                 # 如果是校准模式，调用calibrate方法
-                model_obj.cabibrate(
+                model_obj.calibrate(
                     cond=audio,
                     text=final_text_list,
                     duration=duration,

@@ -145,7 +145,7 @@ class CompressManager:
         self.need_cal_window_res = {
             t: True if calibrate_mode else False for t in self.compress_dict.keys()
         }
-    
+
     def is_need_cal_res(self,t):
         '''
         判断当前时间步是否需要计算窗口残差
@@ -198,28 +198,6 @@ class CompressManager:
                 i += 1
         
         return self.need_cal_window_res
-
-# 压缩状态上下文管理
-class CompressStateContext:
-    def __init__(self, compress_manager):
-        self.manager = compress_manager
-        
-    def __enter__(self):
-        # 保存当前状态
-        self.saved_state = {
-            'last_output': self.manager.cached_last_output.detach().clone() if self.manager.cached_last_output is not None else None,
-            'window_res': self.manager.cached_window_res.detach().clone() if self.manager.cached_window_res is not None else None,
-        }
-        return self
-        
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        # 如果方法失败，恢复状态
-        if exc_type is not None or not getattr(self, 'success', False):
-            self.manager.cached_last_output = self.saved_state['last_output']
-            self.manager.cached_window_res = self.saved_state['window_res']
-            
-    def mark_success(self):
-        self.success = True
 
 # seed everything
 

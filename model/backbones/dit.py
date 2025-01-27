@@ -349,3 +349,35 @@ class DiT(nn.Module):
     def set_all_block_need_cal_window_res(self):
         for block in self.transformer_blocks:
             block.compress_manager.calibrate_all_cal_res()
+            
+    def before_calibrate(self):
+        """保存所有block的缓存状态"""
+        try:
+            self.cached_states = {}
+            for i, block in enumerate(self.transformer_blocks):
+                cm = block.compress_manager
+                self.cached_states[i] = {
+                    'last_output': cm.cached_last_output.detach().clone() if cm.cached_last_output is not None else None,
+                    'window_res': cm.cached_window_res.detach().clone() if cm.cached_window_res is not None else None
+                }
+        except Exception as e:
+            print(f"Error in before_calibrate: {str(e)}")
+            self.cached_states = None
+            raise
+            
+    def after_calibrate(self):
+        """恢复所有block的缓存状态"""
+        try:
+            if not hasattr(self, 'cached_states') or self.cached_states is None:
+                return
+                
+            for i, block in enumerate(self.transformer_blocks):
+                if i in self.cached_states:
+                    cm = block.compress_manager
+                    cm.cached_last_output = self.cached_states[i]['last_output']
+                    cm.cached_window_res = self.cached_states[i]['window_res']
+        except Exception as e:
+            print(f"Error in after_calibrate: {str(e)}")
+            raise
+        finally:
+            self.cached_states = None
