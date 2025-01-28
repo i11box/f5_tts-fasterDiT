@@ -111,6 +111,7 @@ class CFM(nn.Module):
 		duplicate_test=False,
 		t_inter=0.1,
 		edit_mask=None,
+		delta = None
 	):
 		self.eval()
 		# raw wave
@@ -210,9 +211,9 @@ class CFM(nn.Module):
 			t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
 		self.transformer.set_all_block_id()
-		#-----------加载策略文件时取消注释--------------
-		self.transformer.load_compression_strategies('C:\\Users\\ASUS\\scoop\\apps\\python\\current\\Lib\\site-packages\\f5_tts\\method0.1.json')
-		#---------------------------------------------------------
+        # 加载策略文件
+		if delta is not None:
+			self.transformer.load_compression_strategies(f'C:\\Users\\ASUS\\scoop\\apps\\python\\current\\Lib\\site-packages\\f5_tts\\method{delta}.json')
 		trajectory = odeint(
 				lambda t, x: fn(t, x, step_cond, text),
 				y0,

@@ -177,9 +177,7 @@ class DiT(nn.Module):
     def report_flops(self):
         print("DiT.report_flops() called")
         total_stats = {
-            "total_gflops": 0,
             "attention_gflops": 0,
-            "linear_gflops": 0
         }
         
         print(f"Number of transformer blocks: {len(self.transformer_blocks)}")

@@ -20,14 +20,12 @@ class FLOPsCounter:
     def __init__(self):
         self.total_flops = 0
         self.attention_flops = 0
-        self.linear_flops = 0
         self.reset()
     
     def reset(self):
         """重置所有计数器"""
         self.total_flops = 0
         self.attention_flops = 0
-        self.linear_flops = 0
     
     def add_attention_flops(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int,window_ratio=None):
         """添加注意力机制的FLOPS
@@ -40,18 +38,6 @@ class FLOPsCounter:
         """
         flops = self.count_attention_flops(query, key, value, heads,window_ratio)
         self.attention_flops += flops
-        self.total_flops += flops
-    
-    def add_linear_flops(
-        self,
-        input_size: int,
-        output_size: int,
-        batch_size: int,
-        seq_len: int
-        ):
-        """添加线性层的FLOPS"""
-        flops = self.count_linear_flops(input_size, output_size, batch_size, seq_len)
-        self.linear_flops += flops
         self.total_flops += flops
     
     @staticmethod
@@ -68,63 +54,34 @@ class FLOPsCounter:
             total_flops: 注意力计算的总FLOPS数
         """
         # 获取张量形状
-        batch_size, num_heads, seq_len, head_dim = query.shape
+        batch_size, seq_len, num_heads, head_dim = query.shape
         
-        # 1. Q @ K^T 的FLOPS
         if window_ratio is not None:
-            # 窗口注意力：每个token只和窗口内的token计算注意力
             window_size = max(1, int(seq_len * window_ratio))
             if window_size % 2 == 0:
                 window_size += 1
-            qk_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
         else:
-            # 普通注意力：每个token和所有token计算注意力
-            qk_flops = batch_size * num_heads * seq_len * seq_len * head_dim * 2
+            window_size = seq_len
+            
+        # 1. Q @ K^T 的FLOPS
+        qk_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
             
         # 2. Softmax的FLOPS (exp + sum + div)
-        if window_ratio is not None:
-            softmax_flops = batch_size * num_heads * seq_len * window_size * 3
-        else:
-            softmax_flops = batch_size * num_heads * seq_len * seq_len * 3
-            
+        softmax_flops = batch_size * num_heads * seq_len * window_size * 3
+
         # 3. attention @ V 的FLOPS
-        if window_ratio is not None:
-            av_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
-        else:
-            av_flops = batch_size * num_heads * seq_len * seq_len * head_dim * 2
-            
+        av_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
+
         total_flops = qk_flops + softmax_flops + av_flops
         
         return total_flops
     
-    @staticmethod
-    def count_linear_flops(input_size: int, output_size: int, batch_size: int, seq_len: int):
-        """统计线性层的FLOPS
-        
-        Args:
-            input_size: 输入特征维度
-            output_size: 输出特征维度
-            batch_size: batch大小
-            seq_len: 序列长度
-            
-        Returns:
-            flops: 线性层的FLOPS数
-        """
-        # 线性层的FLOPS = batch_size * seq_len * input_size * output_size
-        return batch_size * seq_len * input_size * output_size
-    
     def report(self):
         """生成FLOPS统计报告"""
-        total_gflops = self.total_flops / 1e9
         attention_gflops = self.attention_flops / 1e9
-        linear_gflops = self.linear_flops / 1e9
         
         return {
-            "total_gflops": total_gflops,
             "attention_gflops": attention_gflops,
-            "linear_gflops": linear_gflops,
-            "attention_percentage": (attention_gflops / total_gflops * 100) if total_gflops > 0 else 0,
-            "linear_percentage": (linear_gflops / total_gflops * 100) if total_gflops > 0 else 0
         }
 
 #! 每个DiTBlock都有一个，用来存每个时间步的策略
@@ -135,7 +92,9 @@ class CompressManager:
         self.strategy = ['ast','asc-wars','wars','asc']
         self.cached_last_output = None
         self.cached_window_res = None
-        self.need_cal_window_res = {} # 记录需要计算窗口残差的时间步
+        self.need_cal_window_res = {
+            t: True if calibrate_mode else False for t in self.compress_dict.keys()
+        } # 记录需要计算窗口残差的时间步
     
     def reset(self): # 只重置缓存
         self.cached_last_output = None
@@ -170,7 +129,7 @@ class CompressManager:
         - i指针指向当前检查的none策略
         - j指针向后扫描寻找wars或下一个none
         """        
-        if not self.compress_dict:
+        if self.compress_dict is None:
             return self.need_cal_window_res
         
         steps = sorted(float(step) for step in self.compress_dict.keys())
@@ -182,18 +141,30 @@ class CompressManager:
             # none和只计算asc的情况下都有可能需要计算窗口残差
             if 'none' in current_strategy or 'asc' == current_strategy:
                 j = i + 1
+                found_wars = False
                 while j < len(steps):
                     next_strategy = self.compress_dict[f'{steps[j]:.3f}']
                     if 'wars' in next_strategy:
-                        self.need_cal_window_res[f'{steps[i]:.3f}'] = True
-                        # 找到wars后，直接跳到下一个位置继续搜索
+                        found_wars = True
                         break
                     if 'none' in next_strategy:
                         # 找到下一个none，从这里开始新的搜索
                         break
                     j += 1
-                # j之前的都已经处理过了
-                i = j
+                
+                if found_wars:
+                    # 向后查找直到wars之前的最后一个asc或none
+                    last_valid_pos = i
+                    k = i + 1
+                    while k < j:
+                        curr_strategy = self.compress_dict[f'{steps[k]:.3f}']
+                        if 'none' in curr_strategy or 'asc' == curr_strategy:
+                            last_valid_pos = k
+                        k += 1
+                    self.need_cal_window_res[f'{steps[last_valid_pos]:.3f}'] = True
+                    i = j  # 从wars位置继续搜索
+                else:
+                    i += 1  # 没找到wars，继续往后搜索
             else:
                 i += 1
         

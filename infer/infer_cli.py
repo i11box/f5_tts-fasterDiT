@@ -95,7 +95,7 @@ parser.add_argument(
     "-d",
     "--delta",
     type=float,
-    default=0.1,
+    default=None,
     help="Compression threshold",
 )
 
@@ -176,7 +176,7 @@ print(f"Using {model}...")
 ema_model = load_model(model_cls, model_cfg, ckpt_file, mel_spec_type=mel_spec_type, vocab_file=vocab_file)
 
 
-def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed, calibration_mode=False, delta=0.1):
+def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed, calibration_mode=False, delta=None):
     main_voice = {"ref_audio": ref_audio, "ref_text": ref_text}
     if "voices" not in config:
         voices = {"main": main_voice}
@@ -230,10 +230,10 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
                 remove_silence_for_generated_wav(f.name)
             print(f.name)
     #-------------统计压缩结果时取消-------------
-    # print("Calling model_obj.report()")
-    # print(f"Model type: {type(model_obj)}")
-    # flops = model_obj.report()
-    # print(f"FLOPS report result: {flops}")
+    print("Calling model_obj.report()")
+    print(f"Model type: {type(model_obj)}")
+    flops = model_obj.report()
+    print(f"FLOPS report result: {flops}")
     #----------------------------------------------------
 
 def main():

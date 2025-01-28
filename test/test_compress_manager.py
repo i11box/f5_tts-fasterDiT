@@ -15,7 +15,8 @@ class TestCompressManager:
             '1.000': 'wars',
             '2.000': 'ast'
         }
-        assert cm1.get_need_cal_window_res() == ['0.000']
+        result = cm1.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == ['0.000']
 
     def test_get_need_cal_window_res_2(self, compress_manager):
         # 测试用例2：none后面跟none，第二个none后面有wars
@@ -25,7 +26,8 @@ class TestCompressManager:
             '1.000': 'none',
             '2.000': 'wars'
         }
-        assert cm2.get_need_cal_window_res() == ['1.000']
+        result = cm2.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == ['1.000']
 
     def test_get_need_cal_window_res_3(self, compress_manager):
         # 测试用例3：复杂情况 - 多个none和wars交替
@@ -37,7 +39,8 @@ class TestCompressManager:
             '3.000': 'none',
             '4.000': 'wars'
         }
-        assert cm3.get_need_cal_window_res() == ['0.000', '3.000']
+        result = cm3.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == ['0.000', '3.000']
 
     def test_get_need_cal_window_res_4(self, compress_manager):
         # 测试用例4：none后面没有wars
@@ -47,7 +50,8 @@ class TestCompressManager:
             '1.000': 'ast',
             '2.000': 'none'
         }
-        assert cm4.get_need_cal_window_res() == []
+        result = cm4.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == []
 
     def test_get_need_cal_window_res_5(self, compress_manager):
         # 测试用例5：没有none的情况
@@ -57,7 +61,8 @@ class TestCompressManager:
             '1.000': 'ast',
             '2.000': 'wars'
         }
-        assert cm5.get_need_cal_window_res() == []
+        result = cm5.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == []
 
     def test_get_need_cal_window_res_6(self, compress_manager):
         # 测试用例6：边界情况 - 只有一个时间步
@@ -65,7 +70,8 @@ class TestCompressManager:
         cm6.compress_dict = {
             '0.000': 'none'
         }
-        assert cm6.get_need_cal_window_res() == []
+        result = cm6.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == []
 
     def test_get_need_cal_window_res_7(self, compress_manager):
         # 测试用例7：none后面同时有wars和none
@@ -76,5 +82,85 @@ class TestCompressManager:
             '2.000': 'none',
             '3.000': 'wars'
         }
-        assert cm7.get_need_cal_window_res() == ['0.000', '2.000']
+        result = cm7.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == ['0.000', '2.000']
+        
+    def test_get_need_cal_window_res_8(self, compress_manager):
+        cm8 = compress_manager
+        cm8.compress_dict = {
+        "0.000": "none",
+        "0.001": "ast",
+        "0.005": "ast",
+        "0.012": "wars",
+        "0.021": "none",
+        "0.032": "none",
+        "0.046": "none",
+        "0.062": "none",
+        "0.081": "none",
+        "0.102": "none",
+        "0.125": "none",
+        "0.151": "none",
+        "0.179": "asc",
+        "0.209": "asc",
+        "0.241": "asc-wars",
+        "0.275": "asc-wars",
+        "0.311": "asc-wars",
+        "0.349": "asc-wars",
+        "0.388": "asc-wars",
+        "0.428": "asc-wars",
+        "0.471": "asc-wars",
+        "0.515": "asc-wars",
+        "0.560": "asc-wars",
+        "0.606": "asc-wars",
+        "0.653": "asc-wars",
+        "0.700": "asc-wars",
+        "0.749": "none",
+        "0.799": "none",
+        "0.849": "none",
+        "0.899": "none",
+        "0.950": "none",
+        "1.000": "asc-wars"
+        }
+        
+        result = cm8.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == ['0.000', '0.209', '0.950']
+        
+    def test_get_need_cal_window_res_9(self, compress_manager):
+        cm9 = compress_manager
+        cm9.compress_dict = {
+            "0.000": "none",
+            "0.001": "ast",
+            "0.005": "none",
+            "0.012": "none",
+            "0.021": "none",
+            "0.032": "none",
+            "0.046": "none",
+            "0.062": "none",
+            "0.081": "none",
+            "0.102": "none",
+            "0.125": "none",
+            "0.151": "none",
+            "0.179": "none",
+            "0.209": "none",
+            "0.241": "none",
+            "0.275": "asc-wars",
+            "0.311": "asc-wars",
+            "0.349": "asc-wars",
+            "0.388": "asc-wars",
+            "0.428": "asc-wars",
+            "0.471": "asc-wars",
+            "0.515": "asc-wars",
+            "0.560": "none",
+            "0.606": "none",
+            "0.653": "none",
+            "0.700": "none",
+            "0.749": "none",
+            "0.799": "none",
+            "0.849": "none",
+            "0.899": "none",
+            "0.950": "none",
+            "1.000": "none"
+        }
     
+        result = cm9.get_need_cal_window_res()
+        assert [k for k, v in result.items() if v] == ['0.241']
