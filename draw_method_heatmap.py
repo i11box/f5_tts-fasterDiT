@@ -9,7 +9,7 @@ def plot_strategy_heatmap(json_file,delta=0.1):
         data = json.load(f)
     
     # 获取条件模型的策略
-    strategy_dict = data['strategies']
+    strategy_dict = data
     
     # 获取所有块ID和时间步
     block_ids = sorted([int(bid) for bid in strategy_dict.keys()])
@@ -79,5 +79,5 @@ def plot_strategy_heatmap(json_file,delta=0.1):
 # 使用示例
 if __name__ == '__main__':
     # 绘制条件模型的策略热力图
-    for delta in [0.1,0.15,0.2,0.25,0.3,0.35,0.4]:
-        plot_strategy_heatmap('model/backbones/method_' + str(delta) + '.json',delta)
+    for delta in [0.05,0.1,0.15,0.2,0.25,0.3]:
+        plot_strategy_heatmap('method' + str(delta) + '.json',delta)

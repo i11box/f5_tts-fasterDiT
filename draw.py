@@ -5,38 +5,27 @@ import seaborn as sns
 import os
 
 # 定义基准FLOPS（无加速）
-BASE_FLOPS_10 = {
-    'total_gflops': 6383.761002431997,
-    'attention_gflops': 2544.9494322559995,
-    'linear_gflops': 3838.8115701759984
-}
-
-BASE_FLOPS_70 = {
-    'total_gflops': 33995.086532352,
-    'attention_gflops': 22564.467281663994,
-    'linear_gflops': 11430.619250688005
-}
-
-# 定义加速后的FLOPS数据
 FLOPS_DATA_10 = {
-    0.10: {'total_gflops': 6336.959235551998, 'attention_gflops': 2526.291445216, 'linear_gflops': 3810.6677903359987},
-    0.15: {'total_gflops': 5588.130965471999, 'attention_gflops': 2227.7636525760004, 'linear_gflops': 3360.3673128959995},
-    0.20: {'total_gflops': 4586.573154239999, 'attention_gflops': 1828.4827299199997, 'linear_gflops': 2758.0904243200002},
-    0.25: {'total_gflops': 3921.9880645439994, 'attention_gflops': 1563.5393139520002, 'linear_gflops': 2358.4487505919997},
-    0.30: {'total_gflops': 3341.646155232, 'attention_gflops': 1332.1802746560002, 'linear_gflops': 2009.465880576},
-    0.35: {'total_gflops': 2954.1519648959993, 'attention_gflops': 1169.83632304, 'linear_gflops': 1784.315641856},
-    0.40: {'total_gflops': 2617.17924336, 'attention_gflops': 1035.498816352, 'linear_gflops': 1581.680427008}
+    0.05: {'attention_gflops': 59.661068543999995},
+    0.10: {'attention_gflops': 58.181776576},
+    0.15: {'attention_gflops': 55.353881968},
+    0.20: {'attention_gflops': 51.27748718400001},
+    0.25: {'attention_gflops': 46.934152495999996},
+    0.30: {'attention_gflops': 44.909858224000004}
 }
+
+BASE_FLOPS_10 = {'attention_gflops': 60.684338175999976}  # 无加速的基准数据
 
 FLOPS_DATA_70 = {
-    0.10: {'total_gflops': 33745.855692672, 'attention_gflops': 22399.038635903995, 'linear_gflops': 11346.817056768004},
-    0.15: {'total_gflops': 29758.162257792, 'attention_gflops': 19752.180303743997, 'linear_gflops': 10005.981954047998},
-    0.20: {'total_gflops': 24424.622288639996, 'attention_gflops': 16212.007284479998, 'linear_gflops': 8212.61500416},
-    0.25: {'total_gflops': 20885.544365183996, 'attention_gflops': 13862.920514687996, 'linear_gflops': 7022.623850496001},
-    0.30: {'total_gflops': 17795.081953152, 'attention_gflops': 11811.605307263997, 'linear_gflops': 5983.476645887999},
-    0.35: {'total_gflops': 15685.385505408003, 'attention_gflops': 10372.32641088, 'linear_gflops': 5313.059094528001},
-    0.40: {'total_gflops': 13890.923459712, 'attention_gflops': 9181.240161407999, 'linear_gflops': 4709.683298304}
+    0.05: {'attention_gflops': 177.69089923199996},
+    0.10: {'attention_gflops': 173.244693888},
+    0.15: {'attention_gflops': 164.824226784},
+    0.20: {'attention_gflops': 152.68616899200003},
+    0.25: {'attention_gflops': 139.753258848},
+    0.30: {'attention_gflops': 133.725628512}
 }
+
+BASE_FLOPS_70 = {'attention_gflops': 180.69643468799993}  # 无加速的基准数据
 
 def plot_combined_analysis(json_file, delta, text_length=10):
     fig = plt.figure(figsize=(20, 8))
@@ -57,7 +46,7 @@ def plot_strategy_heatmap(json_file, delta, ax):
     with open(json_file, 'r') as f:
         data = json.load(f)
     
-    strategy_dict = data.get('strategies', {})
+    strategy_dict = data
     block_ids = sorted([int(bid) for bid in strategy_dict.keys()])
     timesteps = sorted([float(t) for t in strategy_dict['0'].keys()])
     
@@ -97,7 +86,7 @@ def plot_speedup_curves(text_length, ax):
     base = BASE_FLOPS_10 if text_length == 10 else BASE_FLOPS_70
     
     deltas = sorted(data.keys())
-    speedups_total = [base['total_gflops'] / data[d]['total_gflops'] for d in deltas]
+    speedups_total = [base['attention_gflops'] / data[d]['attention_gflops'] for d in deltas]
     
     # 使用更粗的线条和更大的标记
     ax.plot(deltas, speedups_total, 'o-', label='Speedup Ratio', 
@@ -121,10 +110,10 @@ def plot_speedup_curves(text_length, ax):
     ax.set_xticklabels([f'{d:.2f}' for d in deltas])
 
 if __name__ == '__main__':
-    deltas = [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
+    deltas = [0.05,0.1, 0.15, 0.2, 0.25, 0.3]
     for delta in deltas:
         for text_length in [10, 70]:
-            json_file = 'model/backbones/method_' + str(delta) + '.json'
+            json_file = 'method' + str(delta) + '.json'
             if os.path.exists(json_file):
                 plot_combined_analysis(json_file, delta, text_length)
             else:
