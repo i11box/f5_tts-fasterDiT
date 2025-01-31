@@ -14,6 +14,12 @@ from pypinyin import lazy_pinyin, Style
 
 import logging
 
+import time
+import numpy as np
+from contextlib import contextmanager
+from typing import Optional, List
+from dataclasses import dataclass
+
 class FLOPsCounter:
     """用于统计模型计算量的工具类"""
     
@@ -358,3 +364,53 @@ def log_method_call(func):
             logging.error(f"Error in {func.__name__}: {e}")
             raise e  # 抛出异常，以便继续处理
     return wrapper
+
+
+class LatencyBenchmark:
+    def __init__(self, use_cuda: bool = True):
+        """
+        初始化延迟测试工具
+        
+        Args:
+            use_cuda: 是否使用CUDA计时器
+        """
+        self.use_cuda = use_cuda and torch.cuda.is_available()
+        
+        if self.use_cuda:
+            self.start_event = torch.cuda.Event(enable_timing=True)
+            self.end_event = torch.cuda.Event(enable_timing=True)
+    
+    @contextmanager
+    def measure_time(self):
+        """上下文管理器，用于测量代码块的执行时间"""
+        if self.use_cuda:
+            torch.cuda.synchronize()
+            self.start_event.record()
+        else:
+            self.start_time = time.perf_counter()
+            
+        try:
+            yield
+        finally:
+            if self.use_cuda:
+                self.end_event.record()
+                torch.cuda.synchronize()
+                self.latency = self.start_event.elapsed_time(self.end_event)
+            else:
+                self.latency = (time.perf_counter() - self.start_time) * 1000  # 转换为毫秒
+    
+    def get_latency(self, func, *args, **kwargs):
+        """
+        测量函数的执行时间
+        
+        Args:
+            func: 要测试的函数
+            *args, **kwargs: 传递给函数的参数
+        
+        Returns:
+            float: 执行时间（毫秒）
+        """
+        with self.measure_time():
+            func(*args, **kwargs)
+        return self.latency
+
