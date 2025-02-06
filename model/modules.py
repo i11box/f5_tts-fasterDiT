@@ -787,7 +787,21 @@ class DiTBlock(nn.Module):
         x = x + gate_msa.unsqueeze(1) * attn_output
 
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        ff_output = self.ff(norm)
+        
+        # 处理ast下的ff缓存
+        if 'ast' == method:
+            ff_output = self.compress_manager.cached_last_ff_output
+        else:
+            # 处理asc下的ff缓存
+            if 'asc' == method:
+                norm_uncond, _ = norm.chunk(2, dim=0)
+                ff_output = self.ff(norm_uncond)
+                ff_output = torch.cat([ff_output,ff_output], dim=0)
+            else:
+                ff_output = self.ff(norm)
+
+        self.compress_manager.cached_last_ff_output = ff_output # 缓存ff输出
+        
         x = x + gate_mlp.unsqueeze(1) * ff_output
         #-----------------------------------
         return x
