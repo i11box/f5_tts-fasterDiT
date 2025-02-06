@@ -1,3 +1,4 @@
+.vscode
 /logs
 **/__pycache__
 /attention_weights

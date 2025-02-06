@@ -19,9 +19,10 @@ import torch.nn.functional as F
 import torchaudio
 from librosa.filters import mel as librosa_mel_fn
 from torch import nn
+import flash_attn
 from x_transformers.x_transformers import apply_rotary_pos_emb
 from f5_tts.model.utils import FLOPsCounter,CompressManager
-
+from flash_attn import flash_attn_func
 
 # raw wav to mel spec
 
@@ -345,7 +346,8 @@ class Attention(nn.Module):
         dropout: float = 0.0,
         context_dim: Optional[int] = None,  # if not None -> joint attention
         context_pre_only=None,
-        block_id=None
+        block_id=None,
+        enable_flash_attn = False,
     ):
         super().__init__()
 
@@ -361,6 +363,7 @@ class Attention(nn.Module):
 
         self.context_dim = context_dim
         self.context_pre_only = context_pre_only
+        self.enable_flash_attn = enable_flash_attn
 
         self.to_q = nn.Linear(dim, self.inner_dim)
         self.to_k = nn.Linear(dim, self.inner_dim)
@@ -386,12 +389,15 @@ class Attention(nn.Module):
         mask: bool["b n"] | None = None,  # noqa: F722
         rope=None,  # rotary position embedding for x
         c_rope=None,  # rotary position embedding for c
-        window_ratio = None
+        window_ratio = None,
+        enable_flash_attn = True,
+        need_cal_window_res = False,
+        window_res = None
     ) -> torch.Tensor:
         if c is not None:
-            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,window_ratio=window_ratio)
+            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res)
         else:
-            return self.processor(self, x, mask=mask, rope=rope,block_id=self.block_id,window_ratio=window_ratio)
+            return self.processor(self, x, mask=mask, rope=rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=self.enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res)
 
 
 
@@ -452,11 +458,13 @@ class AttnProcessor:
         mask: bool["b n"] | None = None,  # noqa: F722
         rope=None,  # rotary position embedding
         block_id=None,
-        window_ratio=None
-    ) -> torch.FloatTensor:
-        attn_mask = self._get_final_mask(mask, x,attn.heads, window_ratio)
+        window_ratio=None,
+        enable_flash_attn=True,
+        need_cal_window_res = False,
+        window_res = None
+    ):
         batch_size = x.shape[0]
-
+        
         # `sample` projections.
         query = attn.to_q(x)
         key = attn.to_k(x)
@@ -475,17 +483,79 @@ class AttnProcessor:
         # attention
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        # mask. e.g. inference got a batch with different target durations, mask out the padding
+        query = query.view(batch_size, -1, attn.heads, head_dim)
+        key = key.view(batch_size, -1, attn.heads, head_dim)
+        value = value.view(batch_size, -1, attn.heads, head_dim)
 
         #! 统计注意力计算的FLOPS
-        self.flops_counter.add_attention_flops(query, key, value, attn.heads,window_ratio)
-
-        x = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
-        x = x.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        self.flops_counter.add_attention_flops(query, key, value, attn.heads, window_ratio)
+        window_residual = None
+        '''
+        分三种情况
+        - 有比例而计算残差，返回完整注意力和残差
+        - 有比例不计算残差(肯定有传入的缓存残差),返回窗口注意力 + 缓存残差
+        - 无比例不计算残差，返回完整注意力
+        '''
+        if enable_flash_attn:
+            
+            if window_ratio is not None:
+                # 计算窗口大小
+                window_size = int(seq_len * window_ratio / 2)
+                # 计算窗口注意力
+                window_attn = flash_attn_func(
+                    query,  # [batch_size, seq_len, n_heads, head_dim]
+                    key,    # [batch_size, seq_len, n_heads, head_dim]
+                    value,  # [batch_size, seq_len, n_heads, head_dim]
+                    dropout_p=0.0,
+                    softmax_scale=1.0 / math.sqrt(head_dim),
+                    window_size=(window_size, window_size) if window_size > 0 else (-1, -1)
+                ) 
+                if need_cal_window_res:
+                    full_attn = flash_attn_func(
+                        query,
+                        key,
+                        value,
+                        dropout_p=0.0,
+                        softmax_scale=1.0 / math.sqrt(head_dim),
+                    )
+                    window_residual = full_attn - window_attn
+                    attn_output = full_attn
+                else:
+                    assert window_res is not None
+                    attn_output = window_attn + window_res
+            else:
+                assert need_cal_window_res is False
+                attn_output = flash_attn_func(
+                        query,
+                        key,
+                        value,
+                        dropout_p=0.0,
+                        softmax_scale=1.0 / math.sqrt(head_dim),
+                    )
+            x = attn_output
+        else:
+            # 转换维度顺序以适应torch的attention
+            query = query.transpose(1, 2)  # [batch_size, n_heads, seq_len, head_dim]
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            attn_mask = self._get_final_mask(mask, x, attn.heads, window_ratio)
+            if window_ratio is not None:
+                window_attn = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+                
+                if need_cal_window_res:
+                    no_window_mask = self._get_final_mask(mask, x, attn.heads)
+                    full_attn = F.scaled_dot_product_attention(query, key, value, attn_mask=no_window_mask, dropout_p=0.0, is_causal=False)
+                    window_residual = full_attn - window_attn
+                    attn_output = full_attn
+                else:
+                    assert window_res is not None
+                    attn_output = window_attn + window_res
+            else:
+                assert need_cal_window_res is False
+                attn_output = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
+            attn_output = attn_output.transpose(1, 2)
+            
+        x = attn_output.reshape(batch_size, -1, attn.heads * head_dim)
         x = x.to(query.dtype)
         #-------------------------保存注意力权重------------------------------
         # logger = Logger()
@@ -521,7 +591,10 @@ class AttnProcessor:
         if mask is not None:
             mask = mask.unsqueeze(-1)
             x = x.masked_fill(~mask, 0.0)
-
+            
+        if need_cal_window_res:
+            assert window_res is None, '需要计算窗口残差，但window_residual 不为 None'
+            return x, window_residual
         return x
 
 # Joint Attention processor for MM-DiT
@@ -643,7 +716,8 @@ class DiTBlock(nn.Module):
             heads=heads,
             dim_head=dim_head,
             dropout=dropout,
-            block_id=block_id
+            block_id=block_id,
+            enable_flash_attn = True,
         )
         self.block_id = block_id
         self.ff_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
@@ -669,48 +743,38 @@ class DiTBlock(nn.Module):
 
         #! 若为条件间的共享
         elif 'asc' == method:
-            # 先算无条件
             _,norm_uncond = norm.chunk(2, dim=0)
-            attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope)
             # 如果需要计算窗口残差
             if self.compress_manager.is_need_cal_res(self.cur_step):
-                window_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125)
-                residual_uncond = attn_output_uncond - window_output_uncond
+                attn_output_uncond,residual_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125,need_cal_window_res = True)
                 self.compress_manager.cached_window_res = torch.cat([residual_uncond,residual_uncond], dim=0)
+            else:
+                attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
             attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
 
         #! 窗口残差
         elif 'wars' == method:
             #! 计算窗口注意力
-            window_attn = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125)
-            #! 如果没有窗口残差缓存
-            if self.compress_manager.cached_window_res is None:
-                # 计算完整注意力，如果没有asc
-                residual = attn_output - window_attn
-                self.compress_manager.cached_window_res = residual
-            else:
-                # 使用缓存的残差
-                attn_output = window_attn + self.compress_manager.cached_window_res
+            attn_output = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125,need_cal_window_res = False,window_res = self.compress_manager.cached_window_res)
                 
         # 条件共享 + 窗口残差
         elif 'asc-wars' == method:
             # 先算无条件，并用窗口比
             _ , norm_uncond = norm.chunk(2, dim=0)
-            window_attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125)
             _ , uncond_cached = self.compress_manager.cached_window_res.chunk(2, dim=0)
-            window_attn = window_attn_output_uncond + uncond_cached # 加上无条件部分的残差
-            attn_output = torch.cat([window_attn,window_attn], dim=0)
+            attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = False,window_res = uncond_cached)
+            attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
         
         # 完整计算注意力
         elif 'none' == method:
-            attn_output = self.attn(x=norm, mask=mask, rope=rope)
             # 判断当前时间步是否需要计算残差
             if self.compress_manager.is_need_cal_res(self.cur_step):
                 # 计算残差
-                window_attn = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125)
-                residual = attn_output - window_attn
+                attn_output,residual = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = True)
                 # 缓存残差
                 self.compress_manager.cached_window_res = residual
+            else:
+                attn_output = self.attn(x=norm, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
         
         # 错误处理
         else:
