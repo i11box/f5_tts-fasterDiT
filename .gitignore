@@ -1,4 +1,5 @@
 .vscode
+*.pdf
 /logs
 **/__pycache__
 /attention_weights
