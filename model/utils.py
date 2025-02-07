@@ -116,7 +116,6 @@ class CompressManager:
         self.compress_dict = {}
         self.strategy = ['wars','ast','wars;asc','asc']
         self.cached_last_output = None
-        self.cached_window_res = None
     
     
     def record(self, strategy,t):
