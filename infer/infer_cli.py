@@ -91,6 +91,14 @@ parser.add_argument(
     action="store_true",
     help="Enable calibration/query mode",
 )
+
+parser.add_argument(
+    "-a",
+    "--timer",
+    action="store_true",
+    help="Enable timer",
+)
+
 parser.add_argument(
     "-d",
     "--delta",
@@ -129,6 +137,7 @@ remove_silence = args.remove_silence if args.remove_silence else config["remove_
 speed = args.speed
 calibration_mode = args.calibration_mode
 delta = args.delta
+timer = args.timer
 
 wave_path = Path(output_dir) / f"infer_cli_out_{delta}.wav"
 # spectrogram_path = Path(output_dir) / "infer_cli_out.png"
@@ -176,7 +185,7 @@ print(f"Using {model}...")
 ema_model = load_model(model_cls, model_cfg, ckpt_file, mel_spec_type=mel_spec_type, vocab_file=vocab_file)
 
 
-def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed, calibration_mode=False, delta=None):
+def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed, calibration_mode=False, delta=None,timer = False):
     main_voice = {"ref_audio": ref_audio, "ref_text": ref_text}
     if "voices" not in config:
         voices = {"main": main_voice}
@@ -213,7 +222,7 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
         ref_text = voices[voice]["ref_text"]
         print(f"Voice: {voice}")
         audio, final_sample_rate, spectragram = infer_process(
-            ref_audio, ref_text, gen_text, model_obj, vocoder, mel_spec_type=mel_spec_type, speed=speed, calibration_mode=calibration_mode, delta=delta
+            ref_audio, ref_text, gen_text, model_obj, vocoder, mel_spec_type=mel_spec_type, speed=speed, calibration_mode=calibration_mode, delta=delta,timer=timer
         )
         generated_audio_segments.append(audio)
 
@@ -237,7 +246,7 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
     #----------------------------------------------------
 
 def main():
-    main_process(ref_audio, ref_text, gen_text, ema_model, mel_spec_type, remove_silence, speed, calibration_mode, delta)
+    main_process(ref_audio, ref_text, gen_text, ema_model, mel_spec_type, remove_silence, speed, calibration_mode, delta,timer)
 
 
 if __name__ == "__main__":

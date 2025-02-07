@@ -97,7 +97,6 @@ class CompressManager:
         self.compress_dict = {}
         self.strategy = ['ast','asc-wars','wars','asc']
         self.cached_last_output = None
-        self.cached_last_ff_output = None
         self.cached_window_res = None
         self.need_cal_window_res = {
             t: True if calibrate_mode else False for t in self.compress_dict.keys()

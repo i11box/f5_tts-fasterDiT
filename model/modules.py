@@ -406,7 +406,7 @@ class Attention(nn.Module):
 
 class AttnProcessor:
     def __init__(self):
-        self.flops_counter = FLOPsCounter() #! 计数器
+        self.flops_counter = FLOPsCounter()
 
     def _create_window_mask(self, seq_len, window_ratio=None):
         """创建滑动窗口掩码
@@ -591,11 +591,12 @@ class AttnProcessor:
         if mask is not None:
             mask = mask.unsqueeze(-1)
             x = x.masked_fill(~mask, 0.0)
-            
+
         if need_cal_window_res:
             assert window_res is None, '需要计算窗口残差，但window_residual 不为 None'
             return x, window_residual
         return x
+
 
 # Joint Attention processor for MM-DiT
 # modified from diffusers/src/diffusers/models/attention_processor.py
@@ -788,19 +789,7 @@ class DiTBlock(nn.Module):
 
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         
-        # 处理ast下的ff缓存
-        if 'ast' == method:
-            ff_output = self.compress_manager.cached_last_ff_output
-        else:
-            # 处理asc下的ff缓存
-            if 'asc' == method:
-                norm_uncond, _ = norm.chunk(2, dim=0)
-                ff_output = self.ff(norm_uncond)
-                ff_output = torch.cat([ff_output,ff_output], dim=0)
-            else:
-                ff_output = self.ff(norm)
-
-        self.compress_manager.cached_last_ff_output = ff_output # 缓存ff输出
+        ff_output = self.ff(norm)
         
         x = x + gate_mlp.unsqueeze(1) * ff_output
         #-----------------------------------

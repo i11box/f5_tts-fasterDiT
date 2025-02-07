@@ -174,8 +174,8 @@ class DiT(nn.Module):
         return output
 
     #! 汇报FLOPS数
-    def report_flops(self):
-        print("DiT.report_flops() called")
+    def report_stats(self):
+        print("DiT.report_stats() called")
         total_stats = {
             "attention_gflops": 0,
         }

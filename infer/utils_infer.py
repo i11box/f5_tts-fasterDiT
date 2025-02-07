@@ -374,7 +374,8 @@ def infer_process(
     fix_duration=fix_duration,
     device=device,
     calibration_mode=False,
-    delta=None
+    delta=None,
+    timer = False
 ):
     # Split the input text into batches
     audio, sr = torchaudio.load(ref_audio)
@@ -402,6 +403,7 @@ def infer_process(
         device=device,
         calibration_mode=calibration_mode,
         delta=delta,
+        timer = timer
     )
 
 
@@ -426,6 +428,7 @@ def infer_batch_process(
     device=None,
     calibration_mode=False,  
     delta=None,  
+    timer=False
 ):
     audio, sr = ref_audio
     if audio.shape[0] > 1:
@@ -473,22 +476,38 @@ def infer_batch_process(
                 print(f"校准完成，压缩策略已保存到method_{delta}.json")
                 return None, None, None
             else:
-                # 统计推理时间
-                lb = LatencyBenchmark(use_cuda=True)
                 
-                with lb.measure_time():
-                    generated, _ = model_obj.sample(
-                        cond=audio,
-                        text=final_text_list,
-                        duration=duration,
-                        steps=nfe_step,
-                        cfg_strength=cfg_strength,
-                        sway_sampling_coef=sway_sampling_coef,
-                        delta=delta
-                    )
+                # 如果要计时，需要热启动
+                if timer:
+                    total_time = 0.0
+                    for i in range(4):
+                        # 第一次运行当热启动
+                        _,_,time = model_obj.sample(
+                            cond=audio,
+                            text=final_text_list,
+                            duration=duration,
+                            steps=nfe_step,
+                            cfg_strength=cfg_strength,
+                            sway_sampling_coef=sway_sampling_coef,
+                            delta=delta,
+                            timer=timer
+                        )
+                        if i != 0:
+                            total_time += time
+            
+                    avg_time = total_time / 3
+                    print(f"平均采样时间:{avg_time} s")
+            
+                generated, _ = model_obj.sample(
+                    cond=audio,
+                    text=final_text_list,
+                    duration=duration,
+                    steps=nfe_step,
+                    cfg_strength=cfg_strength,
+                    sway_sampling_coef=sway_sampling_coef,
+                    delta=delta
+                )
                     
-                print(f"本次推理时间: {lb.latency}ms")
-                
                 generated = generated.to(torch.float32)
                 generated = generated[:, ref_audio_len:, :]
                 generated_mel_spec = generated.permute(0, 2, 1)

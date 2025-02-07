@@ -10,6 +10,8 @@ d - dimension
 from __future__ import annotations
 
 
+import time
+from time import perf_counter
 from random import random
 from typing import Callable
 
@@ -111,9 +113,16 @@ class CFM(nn.Module):
 		duplicate_test=False,
 		t_inter=0.1,
 		edit_mask=None,
-		delta = None
+		delta = None,
+		timer = False
 	):
 		self.eval()
+  
+		if timer:
+			# 统计时间
+			torch.cuda.synchronize()
+			start_time = time.perf_counter()
+  
 		# raw wave
 		if cond.ndim == 2: 
 			cond = self.mel_spec(cond)
@@ -234,6 +243,11 @@ class CFM(nn.Module):
 		#-----------保存策略文件时取消注释--------------
 		#self.transformer.save_compression_strategies('C:\\Users\\ASUS\\scoop\\apps\\python\\current\\Lib\\site-packages\\f5_tts\\method0.025.json')
 		#---------------------------------------------------------
+
+		if timer:
+			torch.cuda.synchronize()
+			end_time = time.perf_counter()
+			return out,trajectory,end_time-start_time
 
 		return out, trajectory
 
@@ -495,8 +509,8 @@ class CFM(nn.Module):
 		print("CFM.report() called")
 		print(f"transformer type: {type(self.transformer)}")
 		if isinstance(self.transformer, DiT): 
-			print("Transformer is DiT, calling report_flops()")
-			flops = self.transformer.report_flops()
+			print("Transformer is DiT, calling report_stats()")
+			flops = self.transformer.report_stats()
 			print(f"Got flops: {flops}")
 			return flops
 		else:
