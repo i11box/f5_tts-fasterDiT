@@ -4,3 +4,8 @@
 /out
 *.wav
 *.flac
+*.png
+*.pdf
+.windsurfrules
+.vscode
+*.pt

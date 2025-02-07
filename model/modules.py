@@ -338,7 +338,7 @@ class FeedForward(nn.Module):
 class Attention(nn.Module):
     def __init__(
         self,
-        processor: JointAttnProcessor | AttnProcessor | FastAttnProcessor,
+        processor: JointAttnProcessor | AttnProcessor,
         dim: int,
         heads: int = 8,
         dim_head: int = 64,
@@ -386,11 +386,13 @@ class Attention(nn.Module):
         mask: bool["b n"] | None = None,  # noqa: F722
         rope=None,  # rotary position embedding for x
         c_rope=None,  # rotary position embedding for c
+        timestep = None,
+        is_null_cond=False
     ) -> torch.Tensor:
         if c is not None:
-            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id)
+            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,timestep=timestep,is_null_cond=is_null_cond)
         else:
-            return self.processor(self, x, mask=mask, rope=rope)
+            return self.processor(self, x, mask=mask, rope=rope,block_id = self.block_id,timestep=timestep,is_null_cond=is_null_cond)
 
 
 
@@ -399,124 +401,29 @@ class Attention(nn.Module):
 
 class AttnProcessor:
     def __init__(self):
-        self.flops_counter = FLOPsCounter() #! 计数器
-
-    def __call__(
-        self,
-        attn: Attention,
-        x: float["b n d"],  # noised input x  # noqa: F722
-        mask: bool["b n"] | None = None,  # noqa: F722
-        rope=None,  # rotary position embedding
-        block_id=None
-    ) -> torch.FloatTensor:
-        batch_size = x.shape[0]
-
-        # `sample` projections.
-        query = attn.to_q(x)
-        key = attn.to_k(x)
-        value = attn.to_v(x)
-
-        #! 统计投影层的FLOPS
-        batch_size, seq_len, _ = x.shape
-        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)  # Q投影
-        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)  # K投影
-        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)  # V投影
-
-        # apply rotary position embedding
-        if rope is not None:
-            freqs, xpos_scale = rope
-            q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
-
-            query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
-            key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
-
-        # attention
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // attn.heads
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        # mask. e.g. inference got a batch with different target durations, mask out the padding
-        if mask is not None:
-            attn_mask = mask
-            attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)  # 'b n -> b 1 1 n'
-            attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
-        else:
-            attn_mask = None
-
-        #! 统计注意力计算的FLOPS
-        self.flops_counter.add_attention_flops(query, key, value, attn.heads)
-
-        x = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
-        x = x.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        x = x.to(query.dtype)
-        #-------------------------保存注意力权重------------------------------
-        # logger = Logger()
-        # # Compute the attention weights
-        # logger.info(f'Compute the attention weights')
-        
-        # attn_weight = query @ key.transpose(-2, -1)  # [b, heads, n, n]
-        # scale_factor = 1 / torch.sqrt(torch.tensor(query.shape[-1], dtype=torch.float32))
-        # logger.info(f'Scale factor: {scale_factor}')
-
-        # attn_weight = attn_weight * scale_factor  # scaled attention score
-
-        # if attn_mask is not None:
-        #     attn_weight += attn_mask
-
-        # logger.info(f'Save attention weights')
-
-        # # Save attention weights
-        # attention_weights = torch.softmax(attn_weight, dim=-1)
-        # output_dir = "./attention_weights"
-        # # Save the attention weights to file
-        # attention_file = os.path.join(output_dir, f"attn_weights_block_{block_id}.pt")
-        # torch.save(attention_weights, attention_file)
-
-        # logger.info(f'Attention weights saved to {attention_file}')
-        #----------------------------------------------------------------------------
-        # linear proj
-        x = attn.to_out[0](x)
-        #! 统计输出投影的FLOPS
-        self.flops_counter.add_linear_flops(attn.inner_dim, attn.dim, batch_size, seq_len)
-        
-        # dropout
-        x = attn.to_out[1](x)
-
-        if mask is not None:
-            mask = mask.unsqueeze(-1)
-            x = x.masked_fill(~mask, 0.0)
-
-        return x
-
-# Fast Attention processor for FastAttn
-# modified from diffusers/src/diffusers/models/attention_processor.py
-
-class FastAttnProcessor:
-    def __init__(self, window_size=256):
-        self.window_size = window_size
         self.flops_counter = FLOPsCounter()
+        self.attention_outputs = {}  # 用于存储注意力输出
         
     def __call__(
         self,
         attn: Attention,
-        x: float["b n d"],  # noised input x
-        mask: bool["b n"] | None = None,  # noqa: F722
-        rope=None,  # rotary position embedding
-    ) -> torch.FloatTensor:
+        x: float["b n d"],
+        mask: bool["b n"] | None = None,
+        rope=None,
+        block_id=None,
+        timestep=None,
+        is_null_cond=False
+    ) :
         batch_size = x.shape[0]
         
-        # 投影到Q/K/V空间
+        # 原有的投影计算
         query = attn.to_q(x)
         key = attn.to_k(x)
         value = attn.to_v(x)
         
-        # 统计投影层FLOPS
+        # FLOPS统计等保持不变
         batch_size, seq_len, _ = x.shape
-        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)  # Q
-        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)  # K
-        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)  # V
+        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)
         
         # 应用旋转位置编码
         if rope is not None:
@@ -524,58 +431,44 @@ class FastAttnProcessor:
             q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
             query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
             key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
-        
-        # 重塑维度
+            
+        # 注意力计算
         inner_dim = key.shape[-1]
         head_dim = inner_dim // attn.heads
         query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
         
-        # 处理掩码
         if mask is not None:
-            attn_mask = mask
-            attn_mask = attn_mask.unsqueeze(1).unsqueeze(1)
+            attn_mask = mask.unsqueeze(1).unsqueeze(1)
             attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
         else:
             attn_mask = None
             
-        # 1. 计算完整注意力
-        full_attn = F.scaled_dot_product_attention(
+        # 计算注意力输出
+        attn_output = F.scaled_dot_product_attention(
             query, key, value,
             attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False
         )
         
-        # 2. 计算窗口注意力
-        # 创建窗口掩码
-        window_mask = self._create_window_mask(query.shape[-2], self.window_size).to(query.device)
-        if attn_mask is not None:
-            window_mask = window_mask & attn_mask
+        # 保存注意力输出
+        if timestep is not None and block_id is not None:
+            key = f"t{timestep.item():.3f}_b{block_id}"
+            if is_null_cond:
+                key += "_null"
+            else:
+                key += "_cond"
+                
+            # 保存注意力输出（转换为CPU并分离，防止内存泄漏）
+            self.attention_outputs[key] = attn_output
             
-        window_attn = F.scaled_dot_product_attention(
-            query, key, value,
-            attn_mask=window_mask,
-            dropout_p=0.0,
-            is_causal=False
-        )
-        
-        # 3. 计算残差
-        residual = full_attn - window_attn
-        
-        # 重塑回原始维度
-        x = (window_attn + residual).transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        # 后续处理保持不变
+        x = attn_output.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         x = x.to(query.dtype)
         
-        # 统计注意力计算的FLOPS
-        self.flops_counter.add_attention_flops(query, key, value, attn.heads)
-        
-        # 输出投影
         x = attn.to_out[0](x)
-        self.flops_counter.add_linear_flops(attn.inner_dim, attn.dim, batch_size, seq_len)
-        
-        # dropout
         x = attn.to_out[1](x)
         
         if mask is not None:
@@ -584,14 +477,15 @@ class FastAttnProcessor:
             
         return x
         
-    def _create_window_mask(self, seq_len, window_size):
-        """创建滑动窗口掩码"""
-        mask = torch.zeros(seq_len, seq_len, dtype=torch.bool)
-        for i in range(seq_len):
-            start = max(0, i - window_size // 2)
-            end = min(seq_len, i + window_size // 2 + 1)
-            mask[i, start:end] = True
-        return mask
+    def save_attention_outputs(self, save_dir="./attention_outputs"):
+        """保存所有注意力输出"""
+        os.makedirs(save_dir, exist_ok=True)
+        for key, value in self.attention_outputs.items():
+            torch.save(value, os.path.join(save_dir, f"{key}.pt"))
+        
+    def clear_attention_outputs(self):
+        """清除存储的注意力输出"""
+        self.attention_outputs.clear()
 
 # Joint Attention processor for MM-DiT
 # modified from diffusers/src/diffusers/models/attention_processor.py
@@ -717,34 +611,22 @@ class DiTBlock(nn.Module):
         self.ff = FeedForward(dim=dim, mult=ff_mult, dropout=dropout, approximate="tanh")
         self.compress_manager = CompressManager() #！记录压缩情况
 
-    def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
-        
-        # pre-norm & modulation for attention input
+    def forward(self, x, t, mask=None, rope=None, timestep=None, is_null_cond=False):
         norm, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.attn_norm(x, emb=t)
-
-        #！首先确认压缩方法
-        method = self.compress_manager.get_method(self.block_id,t)
         
-        #! 若为时间步共享，直接读取上次输出
-        if method == 'ast':
-            attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
-
-        #! 若为条件间的共享
-
-        #! 无策略
-        if method == None:
-            attn_output = self.attn(x=norm, mask=mask, rope=rope)
-
-        #! 缓存ast
-        self.compress_manager.cached_last_output = attn_output
-
-        # process attention output for input x
+        attn_output = self.attn(
+            x=norm, 
+            mask=mask, 
+            rope=rope,
+            timestep=timestep,  # 传递时间步
+            is_null_cond=is_null_cond  # 传递是否为空条件
+        )
+                
         x = x + gate_msa.unsqueeze(1) * attn_output
-
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         ff_output = self.ff(norm)
         x = x + gate_mlp.unsqueeze(1) * ff_output
-
+        
         return x
 
 

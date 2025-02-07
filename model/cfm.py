@@ -28,7 +28,7 @@ from f5_tts.model.utils import (
     list_str_to_tensor,
     mask_from_frac_lengths,
 )
-
+from f5_tts.model.modules import AttnProcessor
 
 class CFM(nn.Module):
     def __init__(
@@ -203,6 +203,12 @@ class CFM(nn.Module):
         sampled = trajectory[-1]
         out = sampled
         out = torch.where(cond_mask, cond, out)
+
+        # 在采样结束后
+        for block in self.transformer.transformer_blocks:
+            if isinstance(block.attn.processor, AttnProcessor):
+                block.attn.processor.save_attention_outputs()
+                block.attn.processor.clear_attention_outputs()
 
         if exists(vocoder):
             out = out.permute(0, 2, 1)
