@@ -8,6 +8,7 @@ d - dimension
 """
 
 from __future__ import annotations
+from copy import deepcopy
 
 from f5_tts.model.logger import Logger
 import math
@@ -392,12 +393,13 @@ class Attention(nn.Module):
         window_ratio = None,
         enable_flash_attn = True,
         need_cal_window_res = False,
-        window_res = None
-    ) -> torch.Tensor:
+        window_res = None,
+        ast_out = None
+    ) :
         if c is not None:
-            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res)
+            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res,ast_out=ast_out)
         else:
-            return self.processor(self, x, mask=mask, rope=rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=self.enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res)
+            return self.processor(self, x, mask=mask, rope=rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=self.enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res,ast_out=ast_out)
 
 
 
@@ -461,127 +463,134 @@ class AttnProcessor:
         window_ratio=None,
         enable_flash_attn=True,
         need_cal_window_res = False,
-        window_res = None
-    ):
-        batch_size = x.shape[0]
-        
-        # `sample` projections.
-        query = attn.to_q(x)
-        key = attn.to_k(x)
-        value = attn.to_v(x)
-
-        batch_size, seq_len, _ = x.shape
-
-        # apply rotary position embedding
-        if rope is not None:
-            freqs, xpos_scale = rope
-            q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
-
-            query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
-            key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
-
-        # attention
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // attn.heads
-        query = query.view(batch_size, -1, attn.heads, head_dim)
-        key = key.view(batch_size, -1, attn.heads, head_dim)
-        value = value.view(batch_size, -1, attn.heads, head_dim)
-
-        #! 统计注意力计算的FLOPS
-        self.flops_counter.add_attention_flops(query, key, value, attn.heads, window_ratio)
-        window_residual = None
-        '''
-        分三种情况
-        - 有比例而计算残差，返回完整注意力和残差
-        - 有比例不计算残差(肯定有传入的缓存残差),返回窗口注意力 + 缓存残差
-        - 无比例不计算残差，返回完整注意力
-        '''
-        if enable_flash_attn:
-            
-            if window_ratio is not None:
-                # 计算窗口大小
-                window_size = int(seq_len * window_ratio / 2)
-                # 计算窗口注意力
-                window_attn = flash_attn_func(
-                    query,  # [batch_size, seq_len, n_heads, head_dim]
-                    key,    # [batch_size, seq_len, n_heads, head_dim]
-                    value,  # [batch_size, seq_len, n_heads, head_dim]
-                    dropout_p=0.0,
-                    softmax_scale=1.0 / math.sqrt(head_dim),
-                    window_size=(window_size, window_size) if window_size > 0 else (-1, -1)
-                ) 
-                if need_cal_window_res:
-                    full_attn = flash_attn_func(
-                        query,
-                        key,
-                        value,
-                        dropout_p=0.0,
-                        softmax_scale=1.0 / math.sqrt(head_dim),
-                    )
-                    window_residual = full_attn - window_attn
-                    attn_output = full_attn
-                else:
-                    assert window_res is not None
-                    attn_output = window_attn + window_res
-            else:
-                assert need_cal_window_res is False
-                attn_output = flash_attn_func(
-                        query,
-                        key,
-                        value,
-                        dropout_p=0.0,
-                        softmax_scale=1.0 / math.sqrt(head_dim),
-                    )
-            x = attn_output
+        window_res = None,
+        ast_out = None
+    ): 
+        if ast_out is not None:
+            ast = ast_out
+            x = ast_out
         else:
-            # 转换维度顺序以适应torch的attention
-            query = query.transpose(1, 2)  # [batch_size, n_heads, seq_len, head_dim]
-            key = key.transpose(1, 2)
-            value = value.transpose(1, 2)
-            attn_mask = self._get_final_mask(mask, x, attn.heads, window_ratio)
-            if window_ratio is not None:
-                window_attn = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
-                
-                if need_cal_window_res:
-                    no_window_mask = self._get_final_mask(mask, x, attn.heads)
-                    full_attn = F.scaled_dot_product_attention(query, key, value, attn_mask=no_window_mask, dropout_p=0.0, is_causal=False)
-                    window_residual = full_attn - window_attn
-                    attn_output = full_attn
-                else:
-                    assert window_res is not None
-                    attn_output = window_attn + window_res
-            else:
-                assert need_cal_window_res is False
-                attn_output = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
-            attn_output = attn_output.transpose(1, 2)
+            ast = None
+            batch_size = x.shape[0]
             
-        x = attn_output.reshape(batch_size, -1, attn.heads * head_dim)
-        x = x.to(query.dtype)
-        #-------------------------保存注意力权重------------------------------
-        # logger = Logger()
-        # # Compute the attention weights
-        # logger.info(f'Compute the attention weights')
-        
-        # attn_weight = query @ key.transpose(-2, -1)  # [b, heads, n, n]
-        # scale_factor = 1 / torch.sqrt(torch.tensor(query.shape[-1], dtype=torch.float32))
-        # logger.info(f'Scale factor: {scale_factor}')
+            # `sample` projections.
+            query = attn.to_q(x)
+            key = attn.to_k(x)
+            value = attn.to_v(x)
 
-        # attn_weight = attn_weight * scale_factor  # scaled attention score
+            batch_size, seq_len, _ = x.shape
 
-        # if attn_mask is not None:
-        #     attn_weight += attn_mask
+            # apply rotary position embedding
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
 
-        # logger.info(f'Save attention weights')
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
 
-        # # Save attention weights
-        # attention_weights = torch.softmax(attn_weight, dim=-1)
-        # output_dir = "./attention_weights"
-        # # Save the attention weights to file
-        # attention_file = os.path.join(output_dir, f"attn_weights_block_{block_id}.pt")
-        # torch.save(attention_weights, attention_file)
+            # attention
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim)
+            key = key.view(batch_size, -1, attn.heads, head_dim)
+            value = value.view(batch_size, -1, attn.heads, head_dim)
 
-        # logger.info(f'Attention weights saved to {attention_file}')
-        #----------------------------------------------------------------------------
+            #! 统计注意力计算的FLOPS
+            self.flops_counter.add_attention_flops(query, key, value, attn.heads, window_ratio)
+            window_residual = None
+            '''
+            分三种情况
+            - 有比例而计算残差，返回完整注意力和残差
+            - 有比例不计算残差(肯定有传入的缓存残差),返回窗口注意力 + 缓存残差
+            - 无比例不计算残差，返回完整注意力
+            '''
+            if enable_flash_attn:
+                
+                if window_ratio is not None:
+                    # 计算窗口大小
+                    window_size = int(seq_len * window_ratio / 2)
+                    # 计算窗口注意力
+                    window_attn = flash_attn_func(
+                        query,  # [batch_size, seq_len, n_heads, head_dim]
+                        key,    # [batch_size, seq_len, n_heads, head_dim]
+                        value,  # [batch_size, seq_len, n_heads, head_dim]
+                        dropout_p=0.0,
+                        softmax_scale=1.0 / math.sqrt(head_dim),
+                        window_size=(window_size, window_size) if window_size > 0 else (-1, -1)
+                    ) 
+                    if need_cal_window_res:
+                        full_attn = flash_attn_func(
+                            query,
+                            key,
+                            value,
+                            dropout_p=0.0,
+                            softmax_scale=1.0 / math.sqrt(head_dim),
+                        )
+                        window_residual = full_attn - window_attn
+                        attn_output = full_attn
+                    else:
+                        assert window_res is not None
+                        attn_output = window_attn + window_res
+                else:
+                    assert need_cal_window_res is False
+                    attn_output = flash_attn_func(
+                            query,
+                            key,
+                            value,
+                            dropout_p=0.0,
+                            softmax_scale=1.0 / math.sqrt(head_dim),
+                        )
+                x = attn_output
+            else:
+                # 转换维度顺序以适应torch的attention
+                query = query.transpose(1, 2)  # [batch_size, n_heads, seq_len, head_dim]
+                key = key.transpose(1, 2)
+                value = value.transpose(1, 2)
+                attn_mask = self._get_final_mask(mask, x, attn.heads, window_ratio)
+                if window_ratio is not None:
+                    window_attn = F.scaled_dot_product_attention(query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+                    
+                    if need_cal_window_res:
+                        no_window_mask = self._get_final_mask(mask, x, attn.heads)
+                        full_attn = F.scaled_dot_product_attention(query, key, value, attn_mask=no_window_mask, dropout_p=0.0, is_causal=False)
+                        window_residual = full_attn - window_attn
+                        attn_output = full_attn
+                    else:
+                        assert window_res is not None
+                        attn_output = window_attn + window_res
+                else:
+                    assert need_cal_window_res is False
+                    attn_output = F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False)
+                attn_output = attn_output.transpose(1, 2)
+                
+            x = attn_output.reshape(batch_size, -1, attn.heads * head_dim)
+            x = x.to(query.dtype)
+            ast = deepcopy(x)
+            #-------------------------保存注意力权重------------------------------
+            # logger = Logger()
+            # # Compute the attention weights
+            # logger.info(f'Compute the attention weights')
+            
+            # attn_weight = query @ key.transpose(-2, -1)  # [b, heads, n, n]
+            # scale_factor = 1 / torch.sqrt(torch.tensor(query.shape[-1], dtype=torch.float32))
+            # logger.info(f'Scale factor: {scale_factor}')
+
+            # attn_weight = attn_weight * scale_factor  # scaled attention score
+
+            # if attn_mask is not None:
+            #     attn_weight += attn_mask
+
+            # logger.info(f'Save attention weights')
+
+            # # Save attention weights
+            # attention_weights = torch.softmax(attn_weight, dim=-1)
+            # output_dir = "./attention_weights"
+            # # Save the attention weights to file
+            # attention_file = os.path.join(output_dir, f"attn_weights_block_{block_id}.pt")
+            # torch.save(attention_weights, attention_file)
+
+            # logger.info(f'Attention weights saved to {attention_file}')
+            #----------------------------------------------------------------------------
         # linear proj
         x = attn.to_out[0](x)
         
@@ -595,7 +604,7 @@ class AttnProcessor:
         if need_cal_window_res:
             assert window_res is None, '需要计算窗口残差，但window_residual 不为 None'
             return x, window_residual
-        return x
+        return x,ast
 
 
 # Joint Attention processor for MM-DiT
@@ -740,30 +749,32 @@ class DiTBlock(nn.Module):
                 
         #! 若为时间步共享，直接读取上次输出
         if 'ast' == method:
-            attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
+            attn_output, self.compress_manager.cached_last_output = self.attn(x=norm, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False,ast_out = self.compress_manager.cached_last_output)
 
         #! 若为条件间的共享
         elif 'asc' == method:
-            _,norm_uncond = norm.chunk(2, dim=0)
+            _, norm_uncond = norm.chunk(2, dim=0)
             # 如果需要计算窗口残差
             if self.compress_manager.is_need_cal_res(self.cur_step):
                 attn_output_uncond,residual_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125,need_cal_window_res = True)
                 self.compress_manager.cached_window_res = torch.cat([residual_uncond,residual_uncond], dim=0)
             else:
-                attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
+                attn_output_uncond,ast_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
+                self.compress_manager.cached_last_output = torch.cat([ast_uncond,ast_uncond], dim=0)
             attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
 
         #! 窗口残差
         elif 'wars' == method:
             #! 计算窗口注意力
-            attn_output = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125,need_cal_window_res = False,window_res = self.compress_manager.cached_window_res)
+            attn_output,self.compress_manager.cached_last_output = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125,need_cal_window_res = False,window_res = self.compress_manager.cached_window_res)
                 
         # 条件共享 + 窗口残差
         elif 'asc-wars' == method:
             # 先算无条件，并用窗口比
             _ , norm_uncond = norm.chunk(2, dim=0)
             _ , uncond_cached = self.compress_manager.cached_window_res.chunk(2, dim=0)
-            attn_output_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = False,window_res = uncond_cached)
+            attn_output_uncond,ast_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = False,window_res = uncond_cached)
+            self.compress_manager.cached_last_output = torch.cat([ast_uncond,ast_uncond], dim=0)
             attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
         
         # 完整计算注意力
@@ -775,14 +786,11 @@ class DiTBlock(nn.Module):
                 # 缓存残差
                 self.compress_manager.cached_window_res = residual
             else:
-                attn_output = self.attn(x=norm, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
+                attn_output,self.compress_manager.cached_last_output = self.attn(x=norm, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
         
         # 错误处理
         else:
             raise ValueError(f'未知的压缩方法：{method}')
-        
-        #! 缓存ast
-        self.compress_manager.cached_last_output = attn_output
 
         # process attention output for input x
         x = x + gate_msa.unsqueeze(1) * attn_output
