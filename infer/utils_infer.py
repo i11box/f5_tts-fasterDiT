@@ -6,6 +6,8 @@ import logging
 
 from f5_tts.model.logger import Logger
 
+from f5_tts.model.utils import LatencyBenchmark
+
 os.environ["PYTOCH_ENABLE_MPS_FALLBACK"] = "1"  # for MPS device compatibility
 sys.path.append(f"../../{os.path.dirname(os.path.abspath(__file__))}/third_party/BigVGAN/")
 
@@ -470,32 +472,38 @@ def infer_batch_process(
                 )
                 print(f"校准完成，压缩策略已保存到method_{delta}.json")
                 return None, None, None
-            
-            generated, _ = model_obj.sample(
-                cond=audio,
-                text=final_text_list,
-                duration=duration,
-                steps=nfe_step,
-                cfg_strength=cfg_strength,
-                sway_sampling_coef=sway_sampling_coef,
-                delta=delta
-            )
+            else:
+                # 统计推理时间
+                lb = LatencyBenchmark(use_cuda=True)
+                
+                with lb.measure_time():
+                    generated, _ = model_obj.sample(
+                        cond=audio,
+                        text=final_text_list,
+                        duration=duration,
+                        steps=nfe_step,
+                        cfg_strength=cfg_strength,
+                        sway_sampling_coef=sway_sampling_coef,
+                        delta=delta
+                    )
+                    
+                print(f"本次推理时间: {lb.latency}ms")
+                
+                generated = generated.to(torch.float32)
+                generated = generated[:, ref_audio_len:, :]
+                generated_mel_spec = generated.permute(0, 2, 1)
+                if mel_spec_type == "vocos":
+                    generated_wave = vocoder.decode(generated_mel_spec)
+                elif mel_spec_type == "bigvgan":
+                    generated_wave = vocoder(generated_mel_spec)
+                if rms < target_rms:
+                    generated_wave = generated_wave * rms / target_rms
 
-            generated = generated.to(torch.float32)
-            generated = generated[:, ref_audio_len:, :]
-            generated_mel_spec = generated.permute(0, 2, 1)
-            if mel_spec_type == "vocos":
-                generated_wave = vocoder.decode(generated_mel_spec)
-            elif mel_spec_type == "bigvgan":
-                generated_wave = vocoder(generated_mel_spec)
-            if rms < target_rms:
-                generated_wave = generated_wave * rms / target_rms
+                # wav -> numpy
+                generated_wave = generated_wave.squeeze().cpu().numpy()
 
-            # wav -> numpy
-            generated_wave = generated_wave.squeeze().cpu().numpy()
-
-            generated_waves.append(generated_wave)
-            spectrograms.append(generated_mel_spec[0].cpu().numpy())
+                generated_waves.append(generated_wave)
+                spectrograms.append(generated_mel_spec[0].cpu().numpy())
 
     # Combine all generated waves with cross-fading
     if cross_fade_duration <= 0:

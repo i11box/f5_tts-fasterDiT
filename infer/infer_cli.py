@@ -130,7 +130,7 @@ speed = args.speed
 calibration_mode = args.calibration_mode
 delta = args.delta
 
-wave_path = Path(output_dir) / "infer_cli_out.wav"
+wave_path = Path(output_dir) / f"infer_cli_out_{delta}.wav"
 # spectrogram_path = Path(output_dir) / "infer_cli_out.png"
 
 vocoder_name = args.vocoder_name
