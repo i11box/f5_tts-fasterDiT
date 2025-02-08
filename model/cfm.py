@@ -371,8 +371,8 @@ class CFM(nn.Module):
 		# 遍历各种策略
 		total_steps = len(t[1:]) * len(self.transformer.transformer_blocks) * len(method_candidate)
 		with tqdm(total=total_steps, desc="Searching compression strategies") as pbar:
-			for t_step in t[1:]: # 第一个时间步总是none
-				for block_id in range(len(self.transformer.transformer_blocks)):
+			for block_id in range(len(self.transformer.transformer_blocks)):
+				for t_step in t[1:]: # 第一个时间步总是none
 					for method in method_candidate:
 						# 更新进度条描述
 						pbar.set_description(f"t={t_step.item():.3f}, block={block_id}, trying {method}")
@@ -381,7 +381,6 @@ class CFM(nn.Module):
 						method_dict[str(block_id)][f'{t_step.item():.3f}'] = method
 						self.transformer.load_compression_strategies(method_dict)
 						self.transformer.set_all_block_need_cal_window_res()
-						self.transformer.before_calibrate() # 保存缓存
 						# 当前输出
 						pred_speedup = self.transformer(
 								x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
@@ -394,13 +393,11 @@ class CFM(nn.Module):
 							"block_id": block_id, 
 							"method": method,
 							"diff": compare_result,
-							"threshold": delta * (block_id+1) / 22
+							"threshold": delta * (block_id+1) / len(self.transformer.transformer_blocks)
 						})
-						if compare_result < delta * (block_id+1) / 22:
+						if compare_result < delta * (block_id+1) / len(self.transformer.transformer_blocks):
 							pbar.update(len(method_candidate) - method_candidate.index(method))  # 跳过剩余的方法
-							self.transformer.after_calibrate() # 恢复缓存
 							break
-						self.transformer.after_calibrate() # 恢复缓存
 						pbar.update(1)
 					else:
 						method_dict[str(block_id)][f'{t_step.item():.3f}'] = 'none'
