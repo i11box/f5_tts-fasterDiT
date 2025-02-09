@@ -21,6 +21,7 @@ from librosa.filters import mel as librosa_mel_fn
 from torch import nn
 from x_transformers.x_transformers import apply_rotary_pos_emb
 from f5_tts.model.utils import FLOPsCounter,CompressManager
+from flash_attn import flash_attn_func
 
 
 # raw wav to mel spec
@@ -399,6 +400,151 @@ class Attention(nn.Module):
 # Attention processor
 
 
+class SuperAttnProcessor:
+    def __init__(self):
+        self.flops_counter = FLOPsCounter()
+        self.attention_outputs = {}  # 用于存储注意力输出
+        
+    def __call__(
+        self,
+        attn: Attention,
+        x: float["b n d"],
+        mask: bool["b n"] | None = None,
+        rope=None,
+        block_id=None,
+        timestep=None,
+        is_null_cond=False,
+        method = 'full_attention',
+        need_cache_residual = False,
+        need_cache_output = False
+    ) :        
+        if 'ASC' == method:
+            _,x_uncond = x.chunk(2,dim = 0)
+                        # 原有的投影计算
+            query = attn.to_q(x_uncond)
+            key = attn.to_k(x_uncond)
+            value = attn.to_v(x_uncond)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x_uncond.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            attn_output = flash_attn_func(
+                query, key, value, 
+                dropout_p=0.0,
+                causal=False
+            )
+            
+            attn_output = torch.cat([attn_output,attn_output],dim = 0)
+            
+        # 完整计算注意力输出
+        elif method == 'full_attention':
+            # 原有的投影计算
+            query = attn.to_q(x)
+            key = attn.to_k(x)
+            value = attn.to_v(x)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            attn_output = flash_attn_func(
+                query, key, value, attn_mask=attn_mask,
+                dropout_p=0.0,
+                is_causal=False
+            )
+        elif method == 'wars':
+            # 原有的投影计算
+            query = attn.to_q(x)
+            key = attn.to_k(x)
+            value = attn.to_v(x)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            win_attn_output = flash_attn_func(
+                query, key, value, attn_mask=attn_mask,
+                dropout_p=0.0,
+                causal=False,
+                window_size=(-attn.window_size,attn.window_size)
+            )
+            
+        # 后续处理保持不变
+        x = attn_output.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        x = x.to(query.dtype)
+        
+        x = attn.to_out[0](x)
+        x = attn.to_out[1](x)
+        
+        if mask is not None:
+            mask = mask.unsqueeze(-1)
+            x = x.masked_fill(~mask, 0.0)
+        
+        if need_cache_output:
+            attn.cached_output = x # 缓存ast
+        
+        attn.step += 1
+        
+        return x
+
 class AttnProcessor:
     def __init__(self):
         self.flops_counter = FLOPsCounter()
@@ -423,7 +569,6 @@ class AttnProcessor:
         
         # FLOPS统计等保持不变
         batch_size, seq_len, _ = x.shape
-        self.flops_counter.add_linear_flops(attn.dim, attn.inner_dim, batch_size, seq_len)
         
         # 应用旋转位置编码
         if rope is not None:
@@ -446,23 +591,22 @@ class AttnProcessor:
             attn_mask = None
             
         # 计算注意力输出
-        attn_output = F.scaled_dot_product_attention(
-            query, key, value,
-            attn_mask=attn_mask,
+        attn_output = flash_attn_func(
+            query, key, value, attn_mask=attn_mask,
             dropout_p=0.0,
             is_causal=False
         )
         
         # 保存注意力输出
-        if timestep is not None and block_id is not None:
-            key = f"t{timestep.item():.3f}_b{block_id}"
-            if is_null_cond:
-                key += "_null"
-            else:
-                key += "_cond"
+        # if timestep is not None and block_id is not None:
+        #     key = f"t{timestep.item():.3f}_b{block_id}"
+        #     if is_null_cond:
+        #         key += "_null"
+        #     else:
+        #         key += "_cond"
                 
-            # 保存注意力输出（转换为CPU并分离，防止内存泄漏）
-            self.attention_outputs[key] = attn_output
+        #     # 保存注意力输出（转换为CPU并分离，防止内存泄漏）
+        #     self.attention_outputs[key] = attn_output
             
         # 后续处理保持不变
         x = attn_output.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
