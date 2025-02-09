@@ -451,11 +451,22 @@ class SuperAttnProcessor:
             attn_output = flash_attn_func(
                 query, key, value, 
                 dropout_p=0.0,
-                causal=False
+                softmax_scale=1.0 / math.sqrt(head_dim),
             )
             
-            attn_output = torch.cat([attn_output,attn_output],dim = 0)
+            if need_cache_residual:
+                win_attn_output = flash_attn_func (
+                    query, key, value, 
+                    dropout_p=0.0,
+                    softmax_scale=1.0 / math.sqrt(head_dim), 
+                    window_size=(-attn.window_size,attn.window_size)
+                )
             
+                res = attn_output - win_attn_output
+                attn.cached_residual = torch.cat([res,res],dim = 0)
+            
+            attn_output = torch.cat([attn_output,attn_output],dim = 0)
+                        
         # 完整计算注意力输出
         elif method == 'full_attention':
             # 原有的投影计算
@@ -487,10 +498,21 @@ class SuperAttnProcessor:
                 attn_mask = None
             
             attn_output = flash_attn_func(
-                query, key, value, attn_mask=attn_mask,
+                query, key, value,
                 dropout_p=0.0,
-                is_causal=False
+                softmax_scale=1.0 / math.sqrt(head_dim)
             )
+            
+            if need_cache_residual:
+                win_attn_output = flash_attn_func (
+                    query, key, value, 
+                    dropout_p=0.0,
+                    softmax_scale=1.0 / math.sqrt(head_dim), 
+                    window_size=(-attn.window_size,attn.window_size)
+                )
+                res = attn_output - win_attn_output
+                attn.cached_residual = res
+            
         elif method == 'wars':
             # 原有的投影计算
             query = attn.to_q(x)
@@ -520,13 +542,56 @@ class SuperAttnProcessor:
             else:
                 attn_mask = None
             
-            win_attn_output = flash_attn_func(
-                query, key, value, attn_mask=attn_mask,
+            win_attn_output = flash_attn_func (
+                query, key, value, 
                 dropout_p=0.0,
-                causal=False,
+                softmax_scale=1.0 / math.sqrt(head_dim), 
                 window_size=(-attn.window_size,attn.window_size)
             )
             
+            attn_output = win_attn_output + attn.cached_residual
+            
+        elif method == 'wars+ASC':
+            _,x_uncond = x.chunk(2,dim = 0)
+            # 原有的投影计算
+            query = attn.to_q(x_uncond)
+            key = attn.to_k(x_uncond)
+            value = attn.to_v(x_uncond)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x_uncond.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            win_attn_output_uncond = flash_attn_func(
+                query, key, value, 
+                dropout_p=0.0,
+                softmax_scale=1.0 / math.sqrt(head_dim),
+                window_size=(-attn.window_size,attn.window_size)
+            )
+            _,res_uncond = attn.cached_residual.chunk(2,dim=0)
+            win_attn_output = win_attn_output_uncond + res_uncond
+            
+            attn_output = torch.cat([win_attn_output,win_attn_output],dim = 0)
+        
         # 后续处理保持不变
         x = attn_output.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         x = x.to(query.dtype)
@@ -592,9 +657,9 @@ class AttnProcessor:
             
         # 计算注意力输出
         attn_output = flash_attn_func(
-            query, key, value, attn_mask=attn_mask,
+            query, key, value,
             dropout_p=0.0,
-            is_causal=False
+            softmax_scale=1.0 / math.sqrt(head_dim)
         )
         
         # 保存注意力输出

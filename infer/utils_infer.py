@@ -450,20 +450,6 @@ def infer_batch_process(
             gen_text_len = len(gen_text.encode("utf-8"))
             duration = ref_audio_len + int(ref_audio_len / ref_text_len * gen_text_len / speed)
 
-        # 校准模型
-        from f5_tts.hook import calibration, insert_wars_to_attention_forward
-        calibration(
-            wav_path=None,
-            txt_fn=None,
-            out_path=None,
-            worker_id=None,
-            device=device,
-            model=model_obj,
-            steps=nfe_step,
-            threshold=0.1,
-            window_size=64
-        )
-
         # inference
         with torch.inference_mode():
             generated, _ = model_obj.sample(

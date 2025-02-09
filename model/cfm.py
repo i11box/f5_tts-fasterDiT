@@ -160,20 +160,18 @@ class CFM(nn.Module):
 
         # neural ode
 
-        def fn(t, x):
+        def fn(t, x, step_cond, text):
             # at each step, conditioning is fixed
             # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
 
-            # predict flow
+            x, step_cond, text = x.repeat(2, 1, 1), step_cond.repeat(2, 1, 1), text.repeat(2, 1)
             pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False
+                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
             )
+            pred, null_pred = pred.chunk(2)
             if cfg_strength < 1e-5:
                 return pred
 
-            null_pred = self.transformer(
-                x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
-            )
             return pred + (pred - null_pred) * cfg_strength
 
         # noise input
@@ -198,17 +196,18 @@ class CFM(nn.Module):
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
+        trajectory = odeint(
+                lambda t, x: fn(t, x, step_cond, text),
+                y0,
+                t,
+                atol=1e-4,
+                rtol=1e-4,
+                method="euler",
+            )
 
         sampled = trajectory[-1]
         out = sampled
         out = torch.where(cond_mask, cond, out)
-
-        # 在采样结束后
-        for block in self.transformer.transformer_blocks:
-            if isinstance(block.attn.processor, AttnProcessor):
-                block.attn.processor.save_attention_outputs()
-                block.attn.processor.clear_attention_outputs()
 
         if exists(vocoder):
             out = out.permute(0, 2, 1)

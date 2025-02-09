@@ -53,7 +53,7 @@ class TextEmbedding(nn.Module):
         text = F.pad(text, (0, seq_len - text_len), value=0)
 
         if drop_text:  # cfg for text
-            text = torch.zeros_like(text)
+            text[1: ] = 0.0
 
         text = self.text_embed(text)  # b n -> b n d
 
@@ -82,7 +82,7 @@ class InputEmbedding(nn.Module):
 
     def forward(self, x: float["b n d"], cond: float["b n d"], text_embed: float["b n d"], drop_audio_cond=False):  # noqa: F722
         if drop_audio_cond:  # cfg for cond audio
-            cond = torch.zeros_like(cond)
+            cond[1: ]=0.0
 
         x = self.proj(torch.cat((x, cond, text_embed), dim=-1))
         x = self.conv_pos_embed(x) + x
