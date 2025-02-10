@@ -467,10 +467,9 @@ class AttnProcessor:
         ast_out = None
     ): 
         if ast_out is not None:
-            ast = ast_out
-            x = ast_out
+            ast = ast_out.contiguous()
+            x = ast.contiguous()
         else:
-            ast = None
             batch_size = x.shape[0]
             
             # `sample` projections.
