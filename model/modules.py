@@ -494,8 +494,6 @@ class AttnProcessor:
             key = key.view(batch_size, -1, attn.heads, head_dim)
             value = value.view(batch_size, -1, attn.heads, head_dim)
 
-            #! 统计注意力计算的FLOPS
-            self.flops_counter.add_attention_flops(query, key, value, attn.heads, window_ratio)
             window_residual = None
             '''
             分三种情况
@@ -517,6 +515,8 @@ class AttnProcessor:
                         softmax_scale=1.0 / math.sqrt(head_dim),
                         window_size=(window_size, window_size) if window_size > 0 else (-1, -1)
                     ) 
+                    self.flops_counter.add_attention_flops(query, key, value, attn.heads, window_ratio)
+                    
                     if need_cal_window_res:
                         full_attn = flash_attn_func(
                             query,
@@ -525,6 +525,8 @@ class AttnProcessor:
                             dropout_p=0.0,
                             softmax_scale=1.0 / math.sqrt(head_dim),
                         )
+                        self.flops_counter.add_attention_flops(query, key, value, attn.heads)
+                        
                         window_residual = full_attn - window_attn
                         attn_output = full_attn
                     else:
@@ -539,6 +541,7 @@ class AttnProcessor:
                             dropout_p=0.0,
                             softmax_scale=1.0 / math.sqrt(head_dim),
                         )
+                    self.flops_counter.add_attention_flops(query, key, value, attn.heads)
                 x = attn_output
             else:
                 # 转换维度顺序以适应torch的attention
