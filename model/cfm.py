@@ -342,10 +342,13 @@ class CFM(nn.Module):
 		for t_step in t[1:]: # 第一个时间步总是none
 			self.transformer.load_compression_strategies(none_method_dict)
 			self._reset_compress_manager()
-			output_nospeedup[f'{t_step.item():.3f}'] = self.transformer(
+			pred = self.transformer(
 				x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, 
 				drop_audio_cond=True, drop_text=True
 			)
+			pred,null_pred = pred.chunk(2,dim=0)
+			pred = pred*2-null_pred
+			output_nospeedup[f'{t_step.item():.3f}'] = pred
 		
 		# 对第一个时间步进行缓存，使得第二个时间步有机会用ast
 		self.transformer.set_all_block_need_cal_window_res()
@@ -357,8 +360,8 @@ class CFM(nn.Module):
 		# 遍历各种策略
 		total_steps = len(t[1:]) * len(self.transformer.transformer_blocks) * len(method_candidate)
 		with tqdm(total=total_steps, desc="Searching compression strategies") as pbar:
-			for t_step in t[1:]: # 第一个时间步总是none
-				for block_id in range(len(self.transformer.transformer_blocks)):
+			for block_id in range(len(self.transformer.transformer_blocks)):
+				for t_step in t[1:]: # 第一个时间步总是none
 					for method in method_candidate:
 						# 更新进度条描述
 						pbar.set_description(f"t={t_step.item():.3f}, block={block_id}, trying {method}")
@@ -367,11 +370,12 @@ class CFM(nn.Module):
 						method_dict[str(block_id)][f'{t_step.item():.3f}'] = method
 						self.transformer.load_compression_strategies(method_dict)
 						self.transformer.set_all_block_need_cal_window_res()
-						self.transformer.before_calibrate() # 保存缓存
 						# 当前输出
 						pred_speedup = self.transformer(
 								x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
 						)
+						pred_speedup,null_pred_speedup = pred_speedup.chunk(2,dim=0)
+						pred_speedup = pred_speedup*2-null_pred_speedup
 						# 计算比较结果
 						compare_result = self._compression_compare(output_nospeedup[f'{t_step.item():.3f}'], pred_speedup)
 						# 记录日志到wandb
@@ -382,11 +386,13 @@ class CFM(nn.Module):
 							"diff": compare_result,
 							"threshold": delta * (block_id+1) / 22
 						})
+						wandb.run.summary["summary:time_step"] = t_step.item()
+						wandb.run.summary["summary:block_id"] = block_id
+						wandb.run.summary["summary:diff"] = compare_result
+						wandb.run.summary["summary:threshold"] = delta * (block_id+1) / 22
 						if compare_result < delta * (block_id+1) / 22:
 							pbar.update(len(method_candidate) - method_candidate.index(method))  # 跳过剩余的方法
-							self.transformer.after_calibrate() # 恢复缓存
 							break
-						self.transformer.after_calibrate() # 恢复缓存
 						pbar.update(1)
 					else:
 						method_dict[str(block_id)][f'{t_step.item():.3f}'] = 'none'
@@ -394,7 +400,8 @@ class CFM(nn.Module):
 		# 保存策略
 		with open(os.path.join('method' + str(delta) + '.json'), "w") as f:
 			json.dump(method_dict, f, indent=4)
-			
+		
+		wandb.run.finish()
 		print("策略保存成功")
 
 	def _compression_compare(self,a, b):
