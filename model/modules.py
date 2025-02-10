@@ -467,8 +467,8 @@ class AttnProcessor:
         ast_out = None
     ): 
         if ast_out is not None:
-            ast = ast_out
-            x = ast_out
+            x = ast_out.contiguous()
+            return x,ast_out
         else:
             ast = None
             batch_size = x.shape[0]
@@ -565,7 +565,6 @@ class AttnProcessor:
                 
             x = attn_output.reshape(batch_size, -1, attn.heads * head_dim)
             x = x.to(query.dtype)
-            ast = deepcopy(x)
             #-------------------------保存注意力权重------------------------------
             # logger = Logger()
             # # Compute the attention weights
@@ -596,10 +595,12 @@ class AttnProcessor:
         
         # dropout
         x = attn.to_out[1](x)
-
+        
         if mask is not None:
             mask = mask.unsqueeze(-1)
             x = x.masked_fill(~mask, 0.0)
+
+        ast = deepcopy(x)
 
         if need_cal_window_res:
             assert window_res is None, '需要计算窗口残差，但window_residual 不为 None'
@@ -800,6 +801,7 @@ class DiTBlock(nn.Module):
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         
         ff_output = self.ff(norm)
+            
         
         x = x + gate_mlp.unsqueeze(1) * ff_output
         #-----------------------------------
