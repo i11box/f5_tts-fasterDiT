@@ -26,6 +26,7 @@ from f5_tts.model.modules import (
     ConvPositionEmbedding,
     DiTBlock,
     AttnProcessor,
+    SuperAttnProcessor,
     AdaLayerNormZero_Final,
     precompute_freqs_cis,
     get_pos_embed_indices,
@@ -194,7 +195,6 @@ class DiT(nn.Module):
                     total_stats[key] += block_stats[key]
             else:
                 print(f"Block {i} has no AttnProcessor")
-                Logger.warning("no attnProcessor,maybe JointAttnProcessor")
         
         print(f"Final total stats: {total_stats}")
         return total_stats

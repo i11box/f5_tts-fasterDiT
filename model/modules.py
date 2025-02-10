@@ -396,10 +396,18 @@ class Attention(nn.Module):
         window_res = None,
         ast_out = None
     ) :
-        if c is not None:
-            return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res,ast_out=ast_out)
-        else:
-            return self.processor(self, x, mask=mask, rope=rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=self.enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res,ast_out=ast_out)
+        if isinstance(self.processor, AttnProcessor):
+            if c is not None:
+                return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res,ast_out=ast_out)
+            else:
+                return self.processor(self, x, mask=mask, rope=rope,block_id=self.block_id,window_ratio=window_ratio,enable_flash_attn=enable_flash_attn,need_cal_window_res = need_cal_window_res,window_res = window_res,ast_out=ast_out)
+        elif isinstance(self.processor, SuperAttnProcessor):
+            if c is not None:
+                return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id)
+            else:
+                return self.processor(self, x, mask=mask, rope=rope,block_id=self.block_id)
+        
+        
 
 
 
@@ -606,6 +614,223 @@ class AttnProcessor:
             return x, window_residual
         return x,ast
 
+class SuperAttnProcessor:
+    def __init__(self):
+        self.flops_counter = FLOPsCounter()
+        
+    def __call__(
+        self,
+        attn: Attention,
+        x: float["b n d"],
+        mask: bool["b n"] | None = None,
+        rope=None,
+        block_id=None,
+        timestep=None,
+        is_null_cond=False,
+        method = 'full_attention',
+        need_cache_residual = False,
+        need_cache_output = False
+    ) : 
+        if hasattr(attn, "need_cache_residual") and \
+           hasattr(attn, "need_cache_output") and \
+           hasattr(attn, "step"):
+            need_cache_output = attn.need_cache_output[attn.step]
+            need_cache_residual = attn.need_cache_residual[attn.step]
+        if 'ASC' == method:
+            _,x_uncond = x.chunk(2,dim = 0)
+                        # 原有的投影计算
+            query = attn.to_q(x_uncond)
+            key = attn.to_k(x_uncond)
+            value = attn.to_v(x_uncond)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x_uncond.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim)
+            key = key.view(batch_size, -1, attn.heads, head_dim)
+            value = value.view(batch_size, -1, attn.heads, head_dim)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            attn_output = flash_attn_func(
+                query, key, value, 
+                dropout_p=0.0,
+                softmax_scale=1.0 / math.sqrt(head_dim),
+            )
+            
+            if need_cache_residual:
+                win_attn_output = flash_attn_func (
+                    query, key, value, 
+                    dropout_p=0.0,
+                    softmax_scale=1.0 / math.sqrt(head_dim), 
+                    window_size=(-attn.window_size,attn.window_size)
+                )
+            
+                res = attn_output - win_attn_output
+                attn.cached_residual = torch.cat([res,res],dim = 0)
+            
+            attn_output = torch.cat([attn_output,attn_output],dim = 0)
+                        
+        # 完整计算注意力输出
+        elif method == 'full_attention':
+            # 原有的投影计算
+            query = attn.to_q(x)
+            key = attn.to_k(x)
+            value = attn.to_v(x)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim)
+            key = key.view(batch_size, -1, attn.heads, head_dim)
+            value = value.view(batch_size, -1, attn.heads, head_dim)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            attn_output = flash_attn_func(
+                query, key, value,
+                dropout_p=0.0,
+                softmax_scale=1.0 / math.sqrt(head_dim)
+            )
+            
+            if need_cache_residual:
+                win_attn_output = flash_attn_func (
+                    query, key, value, 
+                    dropout_p=0.0,
+                    softmax_scale=1.0 / math.sqrt(head_dim), 
+                    window_size=(-attn.window_size,attn.window_size)
+                )
+                res = attn_output - win_attn_output
+                attn.cached_residual = res
+            
+        elif method == 'wars':
+            # 原有的投影计算
+            query = attn.to_q(x)
+            key = attn.to_k(x)
+            value = attn.to_v(x)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim)
+            key = key.view(batch_size, -1, attn.heads, head_dim)
+            value = value.view(batch_size, -1, attn.heads, head_dim)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            win_attn_output = flash_attn_func (
+                query, key, value, 
+                dropout_p=0.0,
+                softmax_scale=1.0 / math.sqrt(head_dim), 
+                window_size=(-attn.window_size,attn.window_size)
+            )
+            
+            assert hasattr(attn, "cached_residual")
+            attn_output = win_attn_output + attn.cached_residual
+            
+        elif method == 'wars+ASC':
+            _,x_uncond = x.chunk(2,dim = 0)
+            # 原有的投影计算
+            query = attn.to_q(x_uncond)
+            key = attn.to_k(x_uncond)
+            value = attn.to_v(x_uncond)
+            
+            # FLOPS统计等保持不变
+            batch_size, seq_len, _ = x_uncond.shape
+            
+            # 应用旋转位置编码
+            if rope is not None:
+                freqs, xpos_scale = rope
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+                query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+                key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+                
+            # 注意力计算
+            inner_dim = key.shape[-1]
+            head_dim = inner_dim // attn.heads
+            query = query.view(batch_size, -1, attn.heads, head_dim)
+            key = key.view(batch_size, -1, attn.heads, head_dim)
+            value = value.view(batch_size, -1, attn.heads, head_dim)
+            
+            if mask is not None:
+                attn_mask = mask.unsqueeze(1).unsqueeze(1)
+                attn_mask = attn_mask.expand(batch_size, attn.heads, query.shape[-2], key.shape[-2])
+            else:
+                attn_mask = None
+            
+            win_attn_output_uncond = flash_attn_func(
+                query, key, value, 
+                dropout_p=0.0,
+                softmax_scale=1.0 / math.sqrt(head_dim),
+                window_size=(-attn.window_size,attn.window_size)
+            )
+            assert hasattr(attn, "cached_residual")
+            _,res_uncond = attn.cached_residual.chunk(2,dim=0)
+            win_attn_output = win_attn_output_uncond + res_uncond
+            
+            attn_output = torch.cat([win_attn_output,win_attn_output],dim = 0)
+        
+        # 后续处理保持不变
+        x = attn_output.reshape(batch_size, -1, attn.heads * head_dim)
+        x = x.to(query.dtype)
+        
+        x = attn.to_out[0](x)
+        x = attn.to_out[1](x)
+        
+        if mask is not None:
+            mask = mask.unsqueeze(-1)
+            x = x.masked_fill(~mask, 0.0)
+        
+        if need_cache_output:
+            assert hasattr(attn, "cached_output")
+            attn.cached_output = x # 缓存ast
+        
+        if hasattr(attn, "step"):
+            attn.step += 1
+        
+        return x
 
 # Joint Attention processor for MM-DiT
 # modified from diffusers/src/diffusers/models/attention_processor.py

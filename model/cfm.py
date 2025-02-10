@@ -349,7 +349,7 @@ class CFM(nn.Module):
 			} for block_id in range(len(self.transformer.transformer_blocks))
 		}
 		none_method_dict = copy.deepcopy(method_dict) # 重置策略
-		method_candidate = ['ast','asc-wars','wars','asc','none']
+		method_candidate = ['ast','none']
 		# 先收集所有时间步的无压缩输出
 		output_nospeedup = {}
 		
