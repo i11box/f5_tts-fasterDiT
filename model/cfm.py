@@ -21,6 +21,7 @@ import os
 import json
 import copy
 import wandb
+import numpy as np
 
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
@@ -259,7 +260,7 @@ class CFM(nn.Module):
 		duration: int | int["b"],  # noqa: F821
 		*,
 		lens: int["b"] | None = None,  # noqa: F821
-		steps=2,
+		steps=32,
 		sway_sampling_coef=None,
 		seed: int | None = None,
 		max_duration=4096,
@@ -356,10 +357,13 @@ class CFM(nn.Module):
 		for t_step in t[1:]: # 第一个时间步总是none
 			self.transformer.load_compression_strategies(none_method_dict)
 			self._reset_compress_manager()
-			output_nospeedup[f'{t_step.item():.3f}'] = self.transformer(
+			pred = self.transformer(
 				x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, 
 				drop_audio_cond=True, drop_text=True
 			)
+			pred,null_pred = pred.chunk(2,dim=0)
+			pred = pred*2-null_pred
+			output_nospeedup[f'{t_step.item():.3f}'] = pred
 		
 		# 对第一个时间步进行缓存，使得第二个时间步有机会用ast
 		self.transformer.set_all_block_need_cal_window_res()
@@ -385,6 +389,8 @@ class CFM(nn.Module):
 						pred_speedup = self.transformer(
 								x=y0_rep, cond=step_cond_rep, text=text_rep, time=t_step, mask=mask, drop_audio_cond=True, drop_text=True
 						)
+						pred_speedup,null_pred_speedup = pred_speedup.chunk(2,dim=0)
+						pred_speedup = pred_speedup*2-null_pred_speedup
 						# 计算比较结果
 						compare_result = self._compression_compare(output_nospeedup[f'{t_step.item():.3f}'], pred_speedup)
 						# 记录日志到wandb
@@ -395,6 +401,10 @@ class CFM(nn.Module):
 							"diff": compare_result,
 							"threshold": delta * (block_id+1) / len(self.transformer.transformer_blocks)
 						})
+						wandb.run.summary["summary:time_step"] = t_step.item()
+						wandb.run.summary["summary:block_id"] = block_id
+						wandb.run.summary["summary:diff"] = compare_result
+						wandb.run.summary["summary:threshold"] = delta * (block_id+1) / 22
 						if compare_result < delta * (block_id+1) / len(self.transformer.transformer_blocks):
 							pbar.update(len(method_candidate) - method_candidate.index(method))  # 跳过剩余的方法
 							break
@@ -405,7 +415,8 @@ class CFM(nn.Module):
 		# 保存策略
 		with open(os.path.join('method' + str(delta) + '.json'), "w") as f:
 			json.dump(method_dict, f, indent=4)
-			
+		
+		wandb.run.finish()
 		print("策略保存成功")
 
 	def _compression_compare(self,a, b):

@@ -603,7 +603,7 @@ class AttnProcessor:
 
         if need_cal_window_res:
             assert window_res is None, '需要计算窗口残差，但window_residual 不为 None'
-            return x, window_residual
+            return x, window_residual ,ast
         return x,ast
 
 
@@ -753,15 +753,16 @@ class DiTBlock(nn.Module):
 
         #! 若为条件间的共享
         elif 'asc' == method:
-            _, norm_uncond = norm.chunk(2, dim=0)
+            norm_cond,norm_uncond = norm.chunk(2, dim=0)
             # 如果需要计算窗口残差
             if self.compress_manager.is_need_cal_res(self.cur_step):
-                attn_output_uncond,residual_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125,need_cal_window_res = True)
-                self.compress_manager.cached_window_res = torch.cat([residual_uncond,residual_uncond], dim=0)
+                attn_output_cond,residual_cond,ast_cond = self.attn(x=norm_cond, mask=mask, rope=rope,window_ratio=0.125,need_cal_window_res = True)
+                self.compress_manager.cached_window_res = torch.cat([residual_cond,residual_cond], dim=0)
+                self.compress_manager.cached_last_output = torch.cat([ast_cond,ast_cond], dim=0)
             else:
-                attn_output_uncond,ast_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
-                self.compress_manager.cached_last_output = torch.cat([ast_uncond,ast_uncond], dim=0)
-            attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
+                attn_output_cond,ast_cond = self.attn(x=norm_cond, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
+                self.compress_manager.cached_last_output = torch.cat([ast_cond,ast_cond], dim=0)
+            attn_output = torch.cat([attn_output_cond,attn_output_cond], dim=0)
 
         #! 窗口残差
         elif 'wars' == method:
@@ -771,20 +772,21 @@ class DiTBlock(nn.Module):
         # 条件共享 + 窗口残差
         elif 'asc-wars' == method:
             # 先算无条件，并用窗口比
-            _ , norm_uncond = norm.chunk(2, dim=0)
-            _ , uncond_cached = self.compress_manager.cached_window_res.chunk(2, dim=0)
-            attn_output_uncond,ast_uncond = self.attn(x=norm_uncond, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = False,window_res = uncond_cached)
-            self.compress_manager.cached_last_output = torch.cat([ast_uncond,ast_uncond], dim=0)
-            attn_output = torch.cat([attn_output_uncond,attn_output_uncond], dim=0)
+            norm_cond , norm_uncond = norm.chunk(2, dim=0)
+            cond_cached , uncond_cached = self.compress_manager.cached_window_res.chunk(2, dim=0)
+            attn_output_cond,ast_cond = self.attn(x=norm_cond, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = False,window_res = cond_cached)
+            self.compress_manager.cached_last_output = torch.cat([ast_cond,ast_cond], dim=0)
+            attn_output = torch.cat([attn_output_cond,attn_output_cond], dim=0)
         
         # 完整计算注意力
         elif 'none' == method:
             # 判断当前时间步是否需要计算残差
             if self.compress_manager.is_need_cal_res(self.cur_step):
                 # 计算残差
-                attn_output,residual = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = True)
+                attn_output,residual,ast = self.attn(x=norm, mask=mask, rope=rope,window_ratio=0.125,enable_flash_attn=True,need_cal_window_res = True)
                 # 缓存残差
                 self.compress_manager.cached_window_res = residual
+                self.compress_manager.cached_last_output = ast
             else:
                 attn_output,self.compress_manager.cached_last_output = self.attn(x=norm, mask=mask, rope=rope,enable_flash_attn=True,need_cal_window_res = False)
         
