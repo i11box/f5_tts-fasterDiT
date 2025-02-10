@@ -19,6 +19,7 @@ import os
 import json
 import copy
 import wandb
+import numpy as np
 
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
@@ -245,7 +246,7 @@ class CFM(nn.Module):
 		duration: int | int["b"],  # noqa: F821
 		*,
 		lens: int["b"] | None = None,  # noqa: F821
-		steps=2,
+		steps=32,
 		sway_sampling_coef=None,
 		seed: int | None = None,
 		max_duration=4096,

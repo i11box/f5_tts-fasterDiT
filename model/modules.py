@@ -739,7 +739,7 @@ class DiTBlock(nn.Module):
                 
         #! 若为时间步共享，直接读取上次输出
         if 'ast' == method:
-            attn_output = self.compress_manager.cached_last_output if self.compress_manager.cached_last_output is not None else x
+            attn_output = self.compress_manager.cached_last_output
 
         #! 若为条件间的共享
         elif 'asc' == method:
