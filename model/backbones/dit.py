@@ -14,7 +14,10 @@ from f5_tts.model.logger import Logger
 import torch
 from torch import nn
 import torch.nn.functional as F
+import json
+import os
 
+from datetime import datetime
 
 from x_transformers.x_transformers import RotaryEmbedding
 from f5_tts.model.modules import (
@@ -23,6 +26,7 @@ from f5_tts.model.modules import (
     ConvPositionEmbedding,
     DiTBlock,
     AttnProcessor,
+    SuperAttnProcessor,
     AdaLayerNormZero_Final,
     precompute_freqs_cis,
     get_pos_embed_indices,
@@ -53,7 +57,8 @@ class TextEmbedding(nn.Module):
         text = F.pad(text, (0, seq_len - text_len), value=0)
 
         if drop_text:  # cfg for text
-            text[1: ] = 0.0
+            text[1:] = 0.0 # 这里只有后一半进行丢弃，模拟无条件生成
+            # text = torch.zeros_like(text)
 
         text = self.text_embed(text)  # b n -> b n d
 
@@ -82,7 +87,8 @@ class InputEmbedding(nn.Module):
 
     def forward(self, x: float["b n d"], cond: float["b n d"], text_embed: float["b n d"], drop_audio_cond=False):  # noqa: F722
         if drop_audio_cond:  # cfg for cond audio
-            cond[1: ]=0.0
+            cond[1:] = 0.0 # 这里只有后一半进行丢弃，模拟无条件生成
+            # cond = torch.zeros_like(cond)
 
         x = self.proj(torch.cat((x, cond, text_embed), dim=-1))
         x = self.conv_pos_embed(x) + x
@@ -143,6 +149,9 @@ class DiT(nn.Module):
         if time.ndim == 0:
             time = time.repeat(batch)
 
+        # 由于ASC的加入，输入变成了两倍，设置时间步的时候需要分开
+        t_single,_ = torch.chunk(time, 2)
+
         # t: conditioning time, c: context (text + masked cond audio), x: noised input audio
         t = self.time_embed(time)
         text_embed = self.text_embed(text, seq_len, drop_text=drop_text)
@@ -153,28 +162,23 @@ class DiT(nn.Module):
         if self.long_skip_connection is not None:
             residual = x
 
-        if drop_audio_cond:
-            for block in self.transformer_blocks:
-                x = block(x, t, mask=mask, rope=rope,timestep = time,is_null_cond=True)
-        else:
-            for block in self.transformer_blocks:
-                x = block(x, t, mask=mask, rope=rope,timestep = time,is_null_cond=False)
+        for block in self.transformer_blocks:
+            block.cur_step = t_single
+            x = block(x, t, mask=mask, rope=rope)
 
         if self.long_skip_connection is not None:
             x = self.long_skip_connection(torch.cat((x, residual), dim=-1))
 
         x = self.norm_out(x, t)
-        output = self.proj_out(x)                                                                                                                                                                                                                                                
+        output = self.proj_out(x)       
 
         return output
 
     #! 汇报FLOPS数
-    def report_flops(self):
-        print("DiT.report_flops() called")
+    def report_stats(self):
+        print("DiT.report_stats() called")
         total_stats = {
-            "total_gflops": 0,
             "attention_gflops": 0,
-            "linear_gflops": 0
         }
         
         print(f"Number of transformer blocks: {len(self.transformer_blocks)}")
@@ -191,7 +195,187 @@ class DiT(nn.Module):
                     total_stats[key] += block_stats[key]
             else:
                 print(f"Block {i} has no AttnProcessor")
-                Logger.warning("no attnProcessor,maybe JointAttnProcessor")
         
         print(f"Final total stats: {total_stats}")
         return total_stats
+
+    def collect_compression_strategies(self):
+        """收集所有块的压缩策略
+        
+        Returns:
+            dict: 包含所有块的压缩策略信息
+            {
+                block_id: {timestep: strategy}
+            }
+        """
+        strategies = {}
+        
+        # 收集DiT的策略
+        for block in self.transformer_blocks:
+            if block.block_id is not None:
+                strategies[block.block_id] = block.compress_manager.compress_dict
+
+                    
+        return strategies
+        
+    def print_compression_summary(self):
+        """打印压缩策略的统计信息"""
+        strategies = self.collect_compression_strategies()
+                
+        print(f"\n{dit_type.upper()} DiT压缩策略统计:")
+        total_steps = 0
+        strategy_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0,'asc-wars':0}
+        
+        for block_id, block_strategies in strategies.items():
+            print(f"\nBlock {block_id}:")
+            block_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0,'asc-wars':0}
+            
+            for t, strategy in block_strategies.items():
+                block_counts[strategy] += 1
+                strategy_counts[strategy] += 1
+                total_steps += 1
+            
+            # 打印每个块的统计
+            for strategy, count in block_counts.items():
+                if count > 0:
+                    percentage = count / len(block_strategies) * 100
+                    print(f"  {strategy.upper()}: {count} steps ({percentage:.1f}%)")
+        
+        # 打印总体统计
+        print(f"\n总体统计 (总时间步: {total_steps}):")
+        for strategy, count in strategy_counts.items():
+            if count > 0:
+                percentage = count / total_steps * 100
+                print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
+                    
+    def save_compression_strategies(self,file_name:str = 'method.json'):
+        """保存压缩策略到文件
+        
+        Args:
+            save_path: 保存路径，应以.json结尾
+        """
+        # 获取项目根目录
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        # 构建文件路径
+        save_path = os.path.join(project_root, file_name)
+        # 收集策略
+        strategies = self.collect_compression_strategies()
+        
+        # 添加元信息
+        save_data = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'strategies': strategies,
+            'statistics': {}
+        }
+        
+        # 计算统计信息
+                
+        total_steps = 0
+        strategy_counts = {'ast': 0, 'asc': 0, 'wars': 0, 'none': 0,'asc-wars':0}
+        
+        for block_strategies in strategies.values():
+            for strategy in block_strategies.values():
+                strategy_counts[strategy] += 1
+                total_steps += 1
+        
+        # 计算百分比
+        percentages = {
+            strategy: (count / total_steps * 100 if total_steps > 0 else 0)
+            for strategy, count in strategy_counts.items()
+        }
+        
+        save_data['statistics'] = {
+            'total_steps': total_steps,
+            'strategy_counts': strategy_counts,
+            'strategy_percentages': percentages
+        }
+        
+        # 保存到文件
+        with open(save_path, 'w', encoding='utf-8') as f:
+            json.dump(save_data, f, indent=2, ensure_ascii=False)
+            
+        print(f"压缩策略已保存到: {save_path}")
+        
+    def load_compression_strategies(self, load: str | dict):
+        """从文件加载压缩策略
+        
+        Args:
+            load: 策略文件路径/已有策略字典
+        """
+        strategies = {}
+        info_flag = False # 仅在加载dict时输出信息
+        # 如果load是路径
+        if isinstance(load, str) and os.path.isfile(load):
+            info_flag = False
+            # 获取项目根目录
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            # 构建文件路径
+            load = os.path.join(project_root, load)
+            with open(load, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # strategies = data['strategies']
+                strategies = data
+        else: # 如果是dict
+            strategies = load
+        
+        # 更新条件DiT的策略
+        for block_id, block_strategies in strategies.items():
+            for block in self.transformer_blocks:
+                if block.block_id == int(block_id):  # JSON的键都是字符串
+                    block.compress_manager.compress_dict = block_strategies
+                        
+        if info_flag:
+            print(f"已从 {load} 加载压缩策略")
+            print("\n策略统计信息:")
+            stats = data['statistics']
+            print(f"总时间步: {stats['total_steps']}")
+            for strategy, percentage in stats['strategy_percentages'].items():
+                count = stats['strategy_counts'][strategy]
+                if count > 0:
+                    print(f"{strategy.upper()}: {count} steps ({percentage:.1f}%)")
+    
+    def set_all_block_id(self):
+        cnt = 0
+        for block in self.transformer_blocks:
+            block.block_id = cnt
+            cnt += 1
+    
+    def set_all_block_no_method(self):
+        for block in self.transformer_blocks:
+            block.compress_manager.compress_dict = {}
+    
+    def set_all_block_need_cal_window_res(self):
+        for block in self.transformer_blocks:
+            block.compress_manager.calibrate_all_cal_res()
+            
+    def before_calibrate(self):
+        """保存所有block的缓存状态"""
+        try:
+            self.cached_states = {}
+            for i, block in enumerate(self.transformer_blocks):
+                cm = block.compress_manager
+                self.cached_states[i] = {
+                    'last_output': cm.cached_last_output.detach().clone() if cm.cached_last_output is not None else None,
+                    'window_res': cm.cached_window_res.detach().clone() if cm.cached_window_res is not None else None
+                }
+        except Exception as e:
+            print(f"Error in before_calibrate: {str(e)}")
+            self.cached_states = None
+            raise
+            
+    def after_calibrate(self):
+        """恢复所有block的缓存状态"""
+        try:
+            if not hasattr(self, 'cached_states') or self.cached_states is None:
+                return
+                
+            for i, block in enumerate(self.transformer_blocks):
+                if i in self.cached_states:
+                    cm = block.compress_manager
+                    cm.cached_last_output = self.cached_states[i]['last_output']
+                    cm.cached_window_res = self.cached_states[i]['window_res']
+        except Exception as e:
+            print(f"Error in after_calibrate: {str(e)}")
+            raise
+        finally:
+            self.cached_states = None

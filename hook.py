@@ -249,7 +249,5 @@ def efficient_attention_forward(
         self.step += 1
         return self.cached_output
 
-    # ASC机制计算
-    # 如果使用了ASC机制，那我们先只算conditional的情况    
-    return self.processor(self, x, mask=mask, rope=rope,block_id = self.block_id,timestep=timestep,is_null_cond=is_null_cond,method = method,need_cache_residual = self.need_cache_residual[self.step],need_cache_output = self.need_cache_output[self.step])
+    return self.processor(self, x, mask=mask, rope=rope,block_id = self.block_id,timestep=timestep,is_null_cond=is_null_cond,method = method)
 

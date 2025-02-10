@@ -1,9 +1,17 @@
+.vscode
+*.pdf
 /logs
 **/__pycache__
 /attention_weights
 /out
 *.wav
 *.flac
+*.pt
+*.png
+
+# windsurf rules
+.windsurfrules
+
 *.png
 *.pdf
 .windsurfrules

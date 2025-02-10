@@ -14,22 +14,26 @@ from pypinyin import lazy_pinyin, Style
 
 import logging
 
+import time
+import numpy as np
+from contextlib import contextmanager
+from typing import Optional, List
+from dataclasses import dataclass
+
 class FLOPsCounter:
     """用于统计模型计算量的工具类"""
     
     def __init__(self):
         self.total_flops = 0
         self.attention_flops = 0
-        self.linear_flops = 0
         self.reset()
     
     def reset(self):
         """重置所有计数器"""
         self.total_flops = 0
         self.attention_flops = 0
-        self.linear_flops = 0
     
-    def add_attention_flops(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int):
+    def add_attention_flops(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int,window_ratio=None):
         """添加注意力机制的FLOPS
         
         Args:
@@ -38,18 +42,12 @@ class FLOPsCounter:
             value: Value tensor of shape [batch_size, seq_len_v, dim]
             heads: Number of attention heads
         """
-        flops = self.count_attention_flops(query, key, value, heads)
+        flops = self.count_attention_flops(query, key, value, heads,window_ratio)
         self.attention_flops += flops
         self.total_flops += flops
     
-    def add_linear_flops(self, input_size: int, output_size: int, batch_size: int, seq_len: int):
-        """添加线性层的FLOPS"""
-        flops = self.count_linear_flops(input_size, output_size, batch_size, seq_len)
-        self.linear_flops += flops
-        self.total_flops += flops
-    
     @staticmethod
-    def count_attention_flops(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int):
+    def count_attention_flops(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, heads: int,window_ratio=None):
         """统计注意力机制的FLOPS
         
         Args:
@@ -62,51 +60,34 @@ class FLOPsCounter:
             total_flops: 注意力计算的总FLOPS数
         """
         # 获取张量形状
-        batch_size, num_heads, q_seq_len, head_dim = query.size()
-        _, _, kv_seq_len, _ = key.size()
-        dim = head_dim * heads
+        batch_size, seq_len, num_heads, head_dim = query.shape
         
-        # Q·K^T的FLOPS = batch_size * heads * q_seq_len * kv_seq_len * head_dim
-        qk_flops = batch_size * heads * q_seq_len * kv_seq_len * head_dim
-        
-        # Softmax的FLOPS
-        # 每个位置需要一个exp运算和一个除法运算
-        softmax_flops = batch_size * heads * q_seq_len * kv_seq_len * 2
-        
-        # Attention·V的FLOPS
-        av_flops = batch_size * heads * q_seq_len * kv_seq_len * head_dim
-        
-        total_flops = qk_flops + softmax_flops + av_flops
-        return total_flops
-    
-    @staticmethod
-    def count_linear_flops(input_size: int, output_size: int, batch_size: int, seq_len: int):
-        """统计线性层的FLOPS
-        
-        Args:
-            input_size: 输入特征维度
-            output_size: 输出特征维度
-            batch_size: batch大小
-            seq_len: 序列长度
+        if window_ratio is not None:
+            window_size = max(1, int(seq_len * window_ratio))
+            if window_size % 2 == 0:
+                window_size += 1
+        else:
+            window_size = seq_len
             
-        Returns:
-            flops: 线性层的FLOPS数
-        """
-        # 线性层的FLOPS = batch_size * seq_len * input_size * output_size
-        return batch_size * seq_len * input_size * output_size
+        # 1. Q @ K^T 的FLOPS
+        qk_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
+            
+        # 2. Softmax的FLOPS (exp + sum + div)
+        softmax_flops = batch_size * num_heads * seq_len * window_size * 3
+
+        # 3. attention @ V 的FLOPS
+        av_flops = batch_size * num_heads * seq_len * window_size * head_dim * 2
+
+        total_flops = qk_flops + softmax_flops + av_flops
+        
+        return total_flops
     
     def report(self):
         """生成FLOPS统计报告"""
-        total_gflops = self.total_flops / 1e9
         attention_gflops = self.attention_flops / 1e9
-        linear_gflops = self.linear_flops / 1e9
         
         return {
-            "total_gflops": total_gflops,
             "attention_gflops": attention_gflops,
-            "linear_gflops": linear_gflops,
-            "attention_percentage": (attention_gflops / total_gflops * 100) if total_gflops > 0 else 0,
-            "linear_percentage": (linear_gflops / total_gflops * 100) if total_gflops > 0 else 0
         }
 
 #! 每个DiTBlock都有一个，用来存每个时间步的策略
@@ -114,24 +95,88 @@ class CompressManager:
 
     def __init__(self):
         self.compress_dict = {}
-        self.strategy = ['wars','ast','wars;asc','asc']
+        self.strategy = ['ast','asc-wars','wars','asc']
         self.cached_last_output = None
+        self.cached_window_res = None
+        self.need_cal_window_res = {
+            t: True if calibrate_mode else False for t in self.compress_dict.keys()
+        } # 记录需要计算窗口残差的时间步
     
+    def reset(self): # 只重置缓存
+        self.cached_last_output = None
+        self.cached_window_res = None
+    
+    def calibrate_all_cal_res(self,calibrate_mode = True):
+        self.need_cal_window_res = {
+            t: True if calibrate_mode else False for t in self.compress_dict.keys()
+        }
+
+    def is_need_cal_res(self,t):
+        '''
+        判断当前时间步是否需要计算窗口残差
+        '''
+        return self.need_cal_window_res.get(f'{t.item():.3f}', False)
     
     def record(self, strategy,t):
         """
         单个块内，记录各个时间步采用策略
         """
-        self.compress_dict.update({t:strategy})
+        self.compress_dict.update({f'{t.item():.3f}':strategy})
         
-    def get_method(self, block_id,t):
+    def get_method(self, t):
         """
         获取指定时间步的压缩策略
         """
-        return self.compress_dict.get(block_id,{}).get(t, None)
+        return self.compress_dict.get(f'{t.item():.3f}', 'none')
+    
+    def get_need_cal_window_res(self):
+        """
+        双指针计算需要计算窗口残差的时间步
+        - i指针指向当前检查的none策略
+        - j指针向后扫描寻找wars或下一个none
+        """        
+        if self.compress_dict is None:
+            return self.need_cal_window_res
+        
+        steps = sorted(float(step) for step in self.compress_dict.keys())
+        
+        i = 0
+        while i < len(steps):
+            current_strategy = self.compress_dict[f'{steps[i]:.3f}']
+            
+            # none和只计算asc的情况下都有可能需要计算窗口残差
+            if 'none' in current_strategy or 'asc' == current_strategy:
+                j = i + 1
+                found_wars = False
+                while j < len(steps):
+                    next_strategy = self.compress_dict[f'{steps[j]:.3f}']
+                    if 'wars' in next_strategy:
+                        found_wars = True
+                        break
+                    if 'none' in next_strategy:
+                        # 找到下一个none，从这里开始新的搜索
+                        break
+                    j += 1
+                
+                if found_wars:
+                    # 向后查找直到wars之前的最后一个asc或none
+                    last_valid_pos = i
+                    k = i + 1
+                    while k < j:
+                        curr_strategy = self.compress_dict[f'{steps[k]:.3f}']
+                        if 'none' in curr_strategy or 'asc' == curr_strategy:
+                            last_valid_pos = k
+                        k += 1
+                    self.need_cal_window_res[f'{steps[last_valid_pos]:.3f}'] = True
+                    i = j  # 从wars位置继续搜索
+                else:
+                    i += 1  # 没找到wars，继续往后搜索
+            else:
+                i += 1
+        
+        return self.need_cal_window_res
 
 # seed everything
-
 
 def seed_everything(seed=0):
     random.seed(seed)
@@ -319,3 +364,53 @@ def log_method_call(func):
             logging.error(f"Error in {func.__name__}: {e}")
             raise e  # 抛出异常，以便继续处理
     return wrapper
+
+
+class LatencyBenchmark:
+    def __init__(self, use_cuda: bool = True):
+        """
+        初始化延迟测试工具
+        
+        Args:
+            use_cuda: 是否使用CUDA计时器
+        """
+        self.use_cuda = use_cuda and torch.cuda.is_available()
+        
+        if self.use_cuda:
+            self.start_event = torch.cuda.Event(enable_timing=True)
+            self.end_event = torch.cuda.Event(enable_timing=True)
+    
+    @contextmanager
+    def measure_time(self):
+        """上下文管理器，用于测量代码块的执行时间"""
+        if self.use_cuda:
+            torch.cuda.synchronize()
+            self.start_event.record()
+        else:
+            self.start_time = time.perf_counter()
+            
+        try:
+            yield
+        finally:
+            if self.use_cuda:
+                self.end_event.record()
+                torch.cuda.synchronize()
+                self.latency = self.start_event.elapsed_time(self.end_event)
+            else:
+                self.latency = (time.perf_counter() - self.start_time) * 1000  # 转换为毫秒
+    
+    def get_latency(self, func, *args, **kwargs):
+        """
+        测量函数的执行时间
+        
+        Args:
+            func: 要测试的函数
+            *args, **kwargs: 传递给函数的参数
+        
+        Returns:
+            float: 执行时间（毫秒）
+        """
+        with self.measure_time():
+            func(*args, **kwargs)
+        return self.latency
+

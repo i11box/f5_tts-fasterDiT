@@ -85,6 +85,28 @@ parser.add_argument(
     default=1.0,
     help="Adjust the speed of the audio generation (default: 1.0)",
 )
+parser.add_argument(
+    "-q",
+    "--calibration_mode",
+    action="store_true",
+    help="Enable calibration/query mode",
+)
+
+parser.add_argument(
+    "-a",
+    "--timer",
+    action="store_true",
+    help="Enable timer",
+)
+
+parser.add_argument(
+    "-d",
+    "--delta",
+    type=float,
+    default=None,
+    help="Compression threshold",
+)
+
 args = parser.parse_args()
 
 config = tomli.load(open(args.config, "rb"))
@@ -113,8 +135,11 @@ ckpt_file = args.ckpt_file if args.ckpt_file else ""
 vocab_file = args.vocab_file if args.vocab_file else ""
 remove_silence = args.remove_silence if args.remove_silence else config["remove_silence"]
 speed = args.speed
+calibration_mode = args.calibration_mode
+delta = args.delta
+timer = args.timer
 
-wave_path = Path(output_dir) / "infer_cli_out.wav"
+wave_path = Path(output_dir) / f"infer_cli_out_{delta}.wav"
 # spectrogram_path = Path(output_dir) / "infer_cli_out.png"
 
 vocoder_name = args.vocoder_name
@@ -160,7 +185,7 @@ print(f"Using {model}...")
 ema_model = load_model(model_cls, model_cfg, ckpt_file, mel_spec_type=mel_spec_type, vocab_file=vocab_file)
 
 
-def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed):
+def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed, calibration_mode=False, delta=None,timer = False):
     main_voice = {"ref_audio": ref_audio, "ref_text": ref_text}
     if "voices" not in config:
         voices = {"main": main_voice}
@@ -197,7 +222,7 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
         ref_text = voices[voice]["ref_text"]
         print(f"Voice: {voice}")
         audio, final_sample_rate, spectragram = infer_process(
-            ref_audio, ref_text, gen_text, model_obj, vocoder, mel_spec_type=mel_spec_type, speed=speed
+            ref_audio, ref_text, gen_text, model_obj, vocoder, mel_spec_type=mel_spec_type, speed=speed, calibration_mode=calibration_mode, delta=delta,timer=timer
         )
         generated_audio_segments.append(audio)
 
@@ -213,14 +238,15 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
             if remove_silence:
                 remove_silence_for_generated_wav(f.name)
             print(f.name)
-    
+    #-------------统计压缩结果时取消-------------
     print("Calling model_obj.report()")
     print(f"Model type: {type(model_obj)}")
     flops = model_obj.report()
     print(f"FLOPS report result: {flops}")
+    #----------------------------------------------------
 
 def main():
-    main_process(ref_audio, ref_text, gen_text, ema_model, mel_spec_type, remove_silence, speed)
+    main_process(ref_audio, ref_text, gen_text, ema_model, mel_spec_type, remove_silence, speed, calibration_mode, delta,timer)
 
 
 if __name__ == "__main__":
