@@ -800,8 +800,16 @@ class DiTBlock(nn.Module):
 
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         
-        ff_output = self.ff(norm)
-            
+        if method == 'ast':
+            ff_output = self.compress_manager.ff_output
+        elif method == 'asc':
+            norm_cond,norm_uncond = norm.chunk(2, dim=0)
+            ff_output_cond = self.ff(norm_cond)
+            ff_output = torch.cat([ff_output_cond,ff_output_cond], dim=0)
+        else:
+            ff_output = self.ff(norm)
+        
+        self.compress_manager.ff_output = ff_output
         
         x = x + gate_mlp.unsqueeze(1) * ff_output
         #-----------------------------------
