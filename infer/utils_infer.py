@@ -17,7 +17,7 @@ import tempfile
 from importlib.resources import files
 
 import matplotlib
-
+from f5_tts.hook import calibration,set_need_cahce_residual
 matplotlib.use("Agg")
 
 import matplotlib.pylab as plt
@@ -465,64 +465,47 @@ def infer_batch_process(
         with torch.inference_mode():
             if calibration_mode:
                 # 如果是校准模式，调用calibrate方法
-                model_obj.calibrate(
-                    cond=audio,
-                    text=final_text_list,
-                    duration=duration,
-                    steps=nfe_step,
-                    sway_sampling_coef=sway_sampling_coef,
-                    delta=delta
-                )
-                print(f"校准完成，压缩策略已保存到method_{delta}.json")
-                return None, None, None
-            else:
-                
-                # 如果要计时，需要热启动
-                if timer:
-                    total_time = 0.0
-                    for i in range(4):
-                        # 第一次运行当热启动
-                        _,_,time = model_obj.sample(
-                            cond=audio,
-                            text=final_text_list,
-                            duration=duration,
-                            steps=nfe_step,
-                            cfg_strength=cfg_strength,
-                            sway_sampling_coef=sway_sampling_coef,
-                            delta=delta,
-                            timer=timer
-                        )
-                        if i != 0:
-                            total_time += time
+                calibration(model_obj, steps=nfe_step, threshold=delta, window_size=64)
             
-                    avg_time = total_time / 3
-                    print(f"平均采样时间:{avg_time} s")
+            generated, _ = model_obj.sample(
+                cond=audio,
+                text=final_text_list,
+                duration=duration,
+                steps=nfe_step,
+                cfg_strength=cfg_strength,
+                sway_sampling_coef=sway_sampling_coef,
+                delta=delta
+            )
             
-                generated, _ = model_obj.sample(
-                    cond=audio,
-                    text=final_text_list,
-                    duration=duration,
-                    steps=nfe_step,
-                    cfg_strength=cfg_strength,
-                    sway_sampling_coef=sway_sampling_coef,
-                    delta=delta
-                )
-                    
-                generated = generated.to(torch.float32)
-                generated = generated[:, ref_audio_len:, :]
-                generated_mel_spec = generated.permute(0, 2, 1)
-                if mel_spec_type == "vocos":
-                    generated_wave = vocoder.decode(generated_mel_spec)
-                elif mel_spec_type == "bigvgan":
-                    generated_wave = vocoder(generated_mel_spec)
-                if rms < target_rms:
-                    generated_wave = generated_wave * rms / target_rms
+            if calibration_mode:
+                transformer = model_obj.transformer
+                set_need_cahce_residual(transformer)
 
-                # wav -> numpy
-                generated_wave = generated_wave.squeeze().cpu().numpy()
+                # 保存校准后得到的方法
+                to_save_methods = {'methods': [], 'need_residual': []}
+                for blocki, block in enumerate(transformer.transformer_blocks):
+                    to_save_methods['methods'].append(block.attn.steps_method)
+                    to_save_methods['need_residual'].append(block.attn.need_cache_residual)
 
-                generated_waves.append(generated_wave)
-                spectrograms.append(generated_mel_spec[0].cpu().numpy())
+                with open(f"{nfe_step}_{delta}_64.json", 'w') as file:
+                    import json
+                    file.write(json.dumps(to_save_methods))
+
+            generated = generated.to(torch.float32)
+            generated = generated[:, ref_audio_len:, :]
+            generated_mel_spec = generated.permute(0, 2, 1)
+            if mel_spec_type == "vocos":
+                generated_wave = vocoder.decode(generated_mel_spec)
+            elif mel_spec_type == "bigvgan":
+                generated_wave = vocoder(generated_mel_spec)
+            if rms < target_rms:
+                generated_wave = generated_wave * rms / target_rms
+
+            # wav -> numpy
+            generated_wave = generated_wave.squeeze().cpu().numpy()
+
+            generated_waves.append(generated_wave)
+            spectrograms.append(generated_mel_spec[0].cpu().numpy())
 
     # Combine all generated waves with cross-fading
     if cross_fade_duration <= 0:

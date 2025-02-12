@@ -1,35 +1,24 @@
+from copy import deepcopy
 import glob
 import json
+from multiprocessing import Process, Queue
 import os
-import traceback
-import librosa
-import numpy as np
-import setproctitle
-import torch
-import yaml
-import soundfile as sf
-import torch.nn.functional as F
-
-from copy import deepcopy
-from multiprocessing import Queue, Process
-from nemo_text_processing.text_normalization.normalize import Normalizer
-from langdetect import detect as classify_language
-from pydub import AudioSegment
-from tqdm import tqdm
-
-from modules.commons.nar_tts_modules import LengthRegulator
-from utils.audio.align import mel2token_to_dur
-from utils.audio.io import save_wav
-from utils.commons.ckpt_utils import load_ckpt
-from utils.commons.hparams import set_hparams, hparams
-from utils.text.text_encoder import TokenTextEncoder
-from utils.text.ph_tone_convert import map_phone_to_tokendict, split_ph_timestamp, split_ph
-from funasr.utils.postprocess_utils import rich_transcription_postprocess
 import types
 from typing import Any, Optional, Tuple
 
-from modules.tts.megatts3.flow_matching.llama import apply_rotary_emb
 from flash_attn import flash_attn_func
+import librosa
+import numpy as np
+from pydub import AudioSegment
+import soundfile as sf
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+from x_transformers.x_transformers import apply_rotary_pos_emb
+from f5_tts.model.utils import FLOPsCounter,CompressManager
+from f5_tts.model.modules import Attention
+import math
+
 if "TOKENIZERS_PARALLELISM" not in os.environ:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -92,31 +81,68 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         block.attn.need_cache_output[now_stepi] = False
         block.attn.need_cache_residual[now_stepi] = False
 
+    # 总进度条
+    total_blocks = len(model.transformer_blocks)
+    method_candidates = ['AST', 'wars+ASC', 'wars', 'ASC']
+    if not hasattr(model, 'total_pbar'):
+        total_steps = 32 * total_blocks * len(method_candidates)
+        model.total_pbar = tqdm(
+            total=total_steps,
+            desc="总体校准进度",
+            position=0
+        )
+    
+    # 当前步进度条
+    step_pbar = tqdm(
+        total=total_blocks * len(method_candidates),
+        desc=f"时间步 {now_stepi}/32",
+        position=1,
+        leave=False,
+        bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{postfix}]',
+        postfix=f"block 0/{total_blocks} method: initializing"
+    )
+
     # 先走一遍得到full-attention的值
     raw_outputs = model.forward(*args, **kwargs)
+    raw_output_cond,raw_output_uncond = raw_outputs.chunk(2,dim=0)
+    raw_outputs = 2*raw_output_cond - raw_output_uncond
     for blocki, block in enumerate(model.transformer_blocks):
         if now_stepi == 0:
             continue
         # method的由强到弱
-        method_candidates = ['AST', 'wars+ASC', 'wars', 'ASC']
         selected_method = 'full_attention'
         for method in method_candidates:
+            step_pbar.set_postfix_str(f"block {blocki + 1}/{total_blocks} method: {method}")
             # print(f"Try###Block:{blocki} Step:{now_stepi} Method:{method}")
             block.attn.steps_method[now_stepi] = method
 
             for block_ in model.transformer_blocks:
                 block_.attn.step = now_stepi
             efficient_outputs = model.forward(*args, **kwargs)
+            efficient_output_cond,efficient_output_uncond = efficient_outputs.chunk(2,dim=0)
+            efficient_outputs = 2*efficient_output_cond - efficient_output_uncond
             loss = compression_loss(raw_outputs, efficient_outputs)
             threshold = model.loss_thresholds[now_stepi][blocki]
             # print(f"Try### Block:{blocki} Step:{now_stepi} Method:{method} Loss:{loss} Threshold:{threshold}")
 
             if loss<threshold:
+                remaining = len(method_candidates) - method_candidates.index(method)
+                step_pbar.update(remaining)
+                model.total_pbar.update(remaining)
                 selected_method = method
                 break
+            
+            step_pbar.update(1)
+            model.total_pbar.update(1)
+            
+        step_pbar.close()
         
         block.attn.steps_method[now_stepi] = selected_method
         del loss, efficient_outputs
+        
+        if now_stepi == 31:
+            model.total_pbar.close()
+            delattr(model, 'total_pbar')
     del raw_outputs
 
     # 因为这只是一个transformer的一个prehook，
@@ -138,7 +164,7 @@ def set_need_cahce_residual(transformer):
                 block.attn.need_cache_residual[stepi] = False
         block.attn.need_cache_residual[-1] = False
 
-def calibration(wav_path, txt_fn, out_path, worker_id, device, model, steps=32, threshold=0.1, window_size=64, saved_methods_path=""):
+def calibration(model, steps=32, threshold=0.1, window_size=64):
 
     print("Calibration for transformer!!!")
     transformer = model.transformer # model应该是cfm
@@ -152,51 +178,9 @@ def calibration(wav_path, txt_fn, out_path, worker_id, device, model, steps=32, 
         loss_thresholds.append(sub_list)
 
     insert_wars_to_attention_forward(transformer)
-    if os.path.exists(saved_methods_path):
-        import json
-        saved_methods = json.loads(open(saved_methods_path).read())['methods']
-        saved_need_cache_residual = json.loads(open(saved_methods_path).read())['need_residual']
-
-        for methods, need_cache_residual, block in zip(saved_methods, saved_need_cache_residual, transformer.transformer_blocks):
-            block.attn.steps_method = methods
-            block.attn.need_cache_residual = need_cache_residual
-            assert len(methods) == steps
-            assert len(need_cache_residual) == steps
-        set_need_cahce_residual(transformer)
-
-        return
 
     hook = transformer.register_forward_pre_hook(transformer_forward_pre_hook_for_calibration, with_kwargs=True)
     transformer.loss_thresholds = loss_thresholds
-
-    # convert_to_wav(wav_path)
-    # wav_path = wav_path[:-4] + '.wav'
-    # os.makedirs(out_path, exist_ok=True)
-
-    # print(f"| Start Calibration {wav_path}+{txt_fn}")
-    # # subprocess.check_call(f'cp "{wav_path}" "{out_path}/ref.wav"', shell=True)
-    
-    # # 先只采样一条做校准
-    # inp_txts = [x.strip() for x in open(txt_fn).readlines()]
-    # inp_txts = [x for x in inp_txts if x != '']
-    # inp_txts = [inp_txts[0]]
-    
-    # for i, (wav_pred, sr, txt) in enumerate(infer_ins.forward_model([wav_path], inp_txts, out_path)):
-    #     save_wav(wav_pred, f'{out_path}/Calibration_[P]{inp_txts[i][:20]}.wav', sr=sr)
-    
-    hook.remove()
-    del hook
-    set_need_cahce_residual(transformer)
-
-    # 保存校准后得到的方法
-    to_save_methods = {'methods': [], 'need_residual': []}
-    for blocki, block in enumerate(transformer.transformer_blocks):
-        to_save_methods['methods'].append(block.attn.steps_method)
-        to_save_methods['need_residual'].append(block.attn.need_cache_residual)
-
-    with open(f"saved_methods/{steps}_{threshold}_{window_size}.json", 'w') as file:
-        import json
-        file.write(json.dumps(to_save_methods))
 
 def insert_wars_to_attention_forward(transformer, steps=32, window_size=64):
     methods = ["full_attention"] * len(transformer.transformer_blocks)
@@ -216,38 +200,93 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_size=64):
         attn.cached_residual = None
         attn.cached_output = None
 
-def full_forward(
+def efficient_attention_forward(
     self,
-    x: float["b n d"],  # noised input x  # noqa: F722
-    c: float["b n d"] = None,  # context c  # noqa: F722
-    mask: bool["b n"] | None = None,  # noqa: F722
-    rope=None,  # rotary position embedding for x
-    c_rope=None,  # rotary position embedding for c
-    timestep = None,
-    is_null_cond=False
-) :
-    if c is not None:
-        return self.processor(self, x, c=c, mask=mask, rope=rope, c_rope=c_rope,block_id=self.block_id,timestep=timestep,is_null_cond=is_null_cond)
-    else:
-        return self.processor(self, x, mask=mask, rope=rope,block_id = self.block_id,timestep=timestep,is_null_cond=is_null_cond)
-
-def efficient_attention_forward(            
-        self,
-        x: float["b n d"],  # noised input x  # noqa: F722
-        c: float["b n d"] = None,  # context c  # noqa: F722
-        mask: bool["b n"] | None = None,  # noqa: F722
-        rope=None,  # rotary position embedding for x
-        c_rope=None,  # rotary position embedding for c
-        timestep = None,
-        is_null_cond=False
-    ):
+    x: float, 
+    mask: bool | None = None, 
+    rope=None,  # rotary position embedding
+    block_id=None,
+    enable_flash_attn=True,
+): 
+    
     method = self.steps_method[self.step]
-    # print(method, self.step)
 
     # 是否直接share最近一个Step的output, AST机制
     if 'AST' in method:
         self.step += 1
         return self.cached_output
 
-    return self.processor(self, x, mask=mask, rope=rope,block_id = self.block_id,timestep=timestep,is_null_cond=is_null_cond,method = method)
+    # ASC机制计算
+    # 如果使用了ASC机制，那我们先只算conditional的情况    
+    if 'ASC' in method:
+        # 将unconditional排除
+        x,_ = x.chunk(2,dim=0)
 
+    # `sample` projections.
+    query = self.to_q(x)
+    key = self.to_k(x)
+    value = self.to_v(x)
+
+    batch_size, seq_len, _ = x.shape
+
+    # apply rotary position embedding
+    if rope is not None:
+        freqs, xpos_scale = rope
+        q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+
+        query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+        key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+
+    # attention
+    inner_dim = key.shape[-1]
+    head_dim = inner_dim // self.heads
+    query = query.view(batch_size, -1, self.heads, head_dim)
+    key = key.view(batch_size, -1, self.heads, head_dim)
+    value = value.view(batch_size, -1, self.heads, head_dim)
+
+    # step 1，计算window_size
+    w_output = flash_attn_func(query, key, value, causal=False, window_size=(-self.window_size, self.window_size))
+
+    # step2，确定使用full attention还是使用wars
+    if 'full_attention' in method:
+        # 默认使用了full_attention就一定会计算residual
+        f_output = flash_attn_func(query, key, value, causal=False)
+        w_residual = f_output-w_output
+        if self.need_cache_residual[self.step]:
+            self.cached_residual = w_residual
+        output = f_output
+    elif 'wars' in method:
+        assert hasattr(self, 'cached_residual'), "必须要先过Full attention产生Residual output才能使用Wars"
+        output = w_output + self.cached_residual[:batch_size]
+    elif 'ASC' in method:
+        f_output = flash_attn_func(query, key, value, causal=False)
+        w_residual = f_output-w_output
+        if self.need_cache_residual[self.step]:
+            self.cached_residual =  torch.cat([w_residual, w_residual], dim=0)
+        output = f_output
+    else:
+        raise NotImplementedError
+
+    x = output.reshape(batch_size, -1, self.heads * head_dim)
+    x = x.to(query.dtype)
+        
+    # linear proj
+    x = self.to_out[0](x)
+    
+    # dropout
+    x = self.to_out[1](x)
+
+    if mask is not None:
+        mask = mask.unsqueeze(-1)
+        x = x.masked_fill(~mask, 0.0)
+
+    if 'ASC' in method:
+        # 将cond_spk_txt复制给unconditional
+        x = torch.cat([x, x], dim=0)
+    
+    if self.need_cache_output[self.step]:
+        self.cached_output = x
+    
+    self.step += 1
+    
+    return x

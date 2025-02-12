@@ -184,9 +184,9 @@ class CFM(nn.Module):
 
 		# neural ode
 
-        def fn(t, x, step_cond, text):
-            # at each step, conditioning is fixed
-            # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
+		def fn(t, x, step_cond, text):
+			# at each step, conditioning is fixed
+			# step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
 
 			# predict flow
 			x, step_cond, text = x.repeat(2, 1, 1), step_cond.repeat(2, 1, 1), text.repeat(2, 1)

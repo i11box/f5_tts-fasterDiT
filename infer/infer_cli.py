@@ -238,12 +238,6 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
             if remove_silence:
                 remove_silence_for_generated_wav(f.name)
             print(f.name)
-    #-------------统计压缩结果时取消-------------
-    print("Calling model_obj.report()")
-    print(f"Model type: {type(model_obj)}")
-    flops = model_obj.report()
-    print(f"FLOPS report result: {flops}")
-    #----------------------------------------------------
 
 def main():
     main_process(ref_audio, ref_text, gen_text, ema_model, mel_spec_type, remove_silence, speed, calibration_mode, delta,timer)
