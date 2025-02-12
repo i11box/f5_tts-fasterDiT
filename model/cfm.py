@@ -119,11 +119,6 @@ class CFM(nn.Module):
 	):
 		self.eval()
   
-		if timer:
-			# 统计时间
-			torch.cuda.synchronize()
-			start_time = time.perf_counter()
-  
 		# raw wave
 		if cond.ndim == 2: 
 			cond = self.mel_spec(cond)
@@ -222,9 +217,7 @@ class CFM(nn.Module):
 			t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
 		self.transformer.set_all_block_id()
-        # 加载策略文件
-		if delta is not None:
-			self.transformer.load_compression_strategies(f'C:\\Users\\ASUS\\scoop\\apps\\python\\current\\Lib\\site-packages\\f5_tts\\method{delta}.json')
+
 		trajectory = odeint(
 				lambda t, x: fn(t, x, step_cond, text),
 				y0,
@@ -245,11 +238,6 @@ class CFM(nn.Module):
 		#-----------保存策略文件时取消注释--------------
 		#self.transformer.save_compression_strategies('C:\\Users\\ASUS\\scoop\\apps\\python\\current\\Lib\\site-packages\\f5_tts\\method0.025.json')
 		#---------------------------------------------------------
-
-		if timer:
-			torch.cuda.synchronize()
-			end_time = time.perf_counter()
-			return out,trajectory,end_time-start_time
 
 		return out, trajectory
 

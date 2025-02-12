@@ -17,7 +17,7 @@ import tempfile
 from importlib.resources import files
 
 import matplotlib
-from f5_tts.hook import calibration,set_need_cahce_residual
+from f5_tts.hook import calibration,set_need_cahce_residual,speedup,calculate_flops_hook
 matplotlib.use("Agg")
 
 import matplotlib.pylab as plt
@@ -466,7 +466,20 @@ def infer_batch_process(
             if calibration_mode:
                 # 如果是校准模式，调用calibrate方法
                 calibration(model_obj, steps=nfe_step, threshold=delta, window_size=64)
+                
+            if delta is not None:
+                speedup(model_obj, steps = nfe_step, window_size=64, delta=delta)
             
+            # 统计计算的钩子
+            hooks = []
+            # 设置一些参数量
+            for block in model_obj.transformer.transformer_blocks:
+                block.attn.full_ops = 0
+                block.attn.efficient_ops = 0
+                # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
+                hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
+                hooks.append(hook)
+                
             generated, _ = model_obj.sample(
                 cond=audio,
                 text=final_text_list,
@@ -476,7 +489,19 @@ def infer_batch_process(
                 sway_sampling_coef=sway_sampling_coef,
                 delta=delta
             )
+
+            total_full_ops,total_efficient_ops = 0,0
             
+            for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
+                print(f'块{blocki}原需ops: {round(block.attn.full_ops/1e9, 4)}G，加速后ops: {round(block.attn.efficient_ops/1e9, 4)}G')
+                total_full_ops += block.attn.full_ops
+                total_efficient_ops += block.attn.efficient_ops
+                
+            print(f'总原需ops: {round(total_full_ops/1e9, 4)}G，加速后ops: {round(total_efficient_ops/1e9, 4)}G')
+            
+            for hook in hooks:
+                hook.remove()
+
             if calibration_mode:
                 transformer = model_obj.transformer
                 set_need_cahce_residual(transformer)

@@ -27,33 +27,39 @@ if "TOKENIZERS_PARALLELISM" not in os.environ:
 计算Attention的Flops
 """
 
-def calculate_flops_hook(model, args, kwargs):
-    hidden_states = args[0]
-    batch_size, seq_len, dim = hidden_states.size()
-
-    ops = seq_len * seq_len * model.heads * batch_size * dim // model.heads + seq_len * dim * batch_size * seq_len
+def calculate_flops_hook(module, args, kwargs):
+    # 从kwargs中获取hidden_states
+    hidden_states = kwargs['x']
+    batch_size, seq_len, dim = hidden_states.shape
     
-    model.full_ops += ops
-
-    method = model.steps_method[model.step]
-    window_size = model.window_size * 2
-
+    # 基础计算量：Q*K + Attention*V
+    base_ops = seq_len * seq_len * module.heads * batch_size * dim // module.heads + seq_len * dim * batch_size * seq_len
+    
+    # 记录全精度计算量
+    module.full_ops += base_ops
+    
+    # 获取当前方法和窗口大小
+    method = module.steps_method[module.step]
+    window_size = module.window_size * 2
+    
+    # 根据不同方法计算实际计算量
     if method == "full_attention":
-        if model.need_cache_residual[model.step]:
-            ops *= 1 + window_size / seq_len
+        if module.need_cache_residual[module.step]:
+            base_ops *= 1 + window_size / seq_len
     elif method == "ASC":
-        ops = ops / 2
-        if model.need_cache_residual[model.step]:
-            ops *= 1 + window_size / seq_len
+        base_ops = base_ops / 2
+        if module.need_cache_residual[module.step]:
+            base_ops *= 1 + window_size / seq_len
     elif method == 'wars':
-        ops *= window_size / seq_len
+        base_ops *= window_size / seq_len
     elif method == 'wars+ASC':
-        ops = ops * window_size / seq_len / 2
+        base_ops = base_ops * window_size / seq_len / 2
     elif method == "AST":
-        ops = 0
-
-    model.efficient_ops += ops
+        base_ops = 0
     
+    # 记录实际计算量
+    module.efficient_ops += base_ops
+
 """
 计算raw output与efficient output之间的差距，使用默认值计算Loss
 """
@@ -182,23 +188,50 @@ def calibration(model, steps=32, threshold=0.1, window_size=64):
     hook = transformer.register_forward_pre_hook(transformer_forward_pre_hook_for_calibration, with_kwargs=True)
     transformer.loss_thresholds = loss_thresholds
 
-def insert_wars_to_attention_forward(transformer, steps=32, window_size=64):
-    methods = ["full_attention"] * len(transformer.transformer_blocks)
-    output_shares = [False] * len(transformer.transformer_blocks)
-    assert len(methods) == len(transformer.transformer_blocks)
-    for block, method, output_share in zip(transformer.transformer_blocks, methods, output_shares):
-        attn = block.attn
-        # set some attribute
-        attn.window_size = window_size
-        attn.method = method
-        attn.output_share = output_share
-        attn.step = 0
-        attn.forward = types.MethodType(efficient_attention_forward, attn)
-        attn.steps_method = ['full_attention'] * steps
-        attn.need_cache_residual = [True] * steps
-        attn.need_cache_output = [True] * steps
-        attn.cached_residual = None
-        attn.cached_output = None
+def speedup(model,delta = None, steps=32, window_size=64):
+    assert delta is not None
+    print("Speedup for transformer!!!")
+    transformer = model.transformer # model应该是cfm
+    # 加载方法
+    path = f"{steps}_{delta}_{window_size}.json"
+    insert_wars_to_attention_forward(transformer, steps=steps, window_size=window_size, method_path = path)
+
+def insert_wars_to_attention_forward(transformer, steps=32, window_size=64, method_path = None):
+    if method_path is None:
+        methods = ["full_attention"] * len(transformer.transformer_blocks)
+        output_shares = [False] * len(transformer.transformer_blocks)
+        assert len(methods) == len(transformer.transformer_blocks)
+        for block, method, output_share in zip(transformer.transformer_blocks, methods, output_shares):
+            attn = block.attn
+            # set some attribute
+            attn.window_size = window_size
+            attn.method = method
+            attn.output_share = output_share
+            attn.step = 0
+            attn.forward = types.MethodType(efficient_attention_forward, attn)
+            attn.steps_method = ['full_attention'] * steps
+            attn.need_cache_residual = [True] * steps
+            attn.need_cache_output = [True] * steps
+            attn.cached_residual = None
+            attn.cached_output = None
+    else:
+        with open(method_path, 'r') as f:
+            import json
+            saved_methods = json.loads(open(method_path).read())['methods']
+
+            for methods, block in zip(saved_methods, transformer.transformer_blocks):
+                attn = block.attn
+                attn.steps_method = methods
+                attn.window_size = window_size
+                attn.step = 0
+                attn.forward = types.MethodType(efficient_attention_forward, attn)
+                attn.need_cache_residual = [True] * steps
+                attn.need_cache_output = [True] * steps
+                attn.cached_residual = None
+                attn.cached_output = None
+                
+            set_need_cahce_residual(transformer)
+            
 
 def efficient_attention_forward(
     self,
