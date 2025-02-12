@@ -17,7 +17,13 @@ import tempfile
 from importlib.resources import files
 
 import matplotlib
-from f5_tts.hook import calibration,set_need_cahce_residual,speedup,calculate_flops_hook
+from f5_tts.model.hook import (
+    calibration,
+    set_need_cahce_residual,
+    speedup,
+    calculate_flops_hook,
+    insert_wars_to_attention_forward,
+)
 matplotlib.use("Agg")
 
 import matplotlib.pylab as plt
@@ -463,15 +469,19 @@ def infer_batch_process(
 
         # inference
         with torch.inference_mode():
+            calibrate_hook = None
             if calibration_mode:
                 # 如果是校准模式，调用calibrate方法
-                calibration(model_obj, steps=nfe_step, threshold=delta, window_size=64)
+                calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)
+            elif calibration_mode is False and delta is not None:
+                speedup(model_obj, steps = nfe_step, window_ratio=0.125, delta=delta)
+            else:
+                insert_wars_to_attention_forward(model_obj.transformer,steps = nfe_step, window_ratio=0.125)
                 
-            if delta is not None:
-                speedup(model_obj, steps = nfe_step, window_size=64, delta=delta)
-            
             # 统计计算的钩子
             hooks = []
+            if calibrate_hook is not None:
+                hooks.append(calibrate_hook)
             # 设置一些参数量
             for block in model_obj.transformer.transformer_blocks:
                 block.attn.full_ops = 0
@@ -512,7 +522,7 @@ def infer_batch_process(
                     to_save_methods['methods'].append(block.attn.steps_method)
                     to_save_methods['need_residual'].append(block.attn.need_cache_residual)
 
-                with open(f"{nfe_step}_{delta}_64.json", 'w') as file:
+                with open(f"data\\methods\\{nfe_step}_{delta}_0.125.json", 'w') as file:
                     import json
                     file.write(json.dumps(to_save_methods))
 

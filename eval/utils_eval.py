@@ -365,6 +365,44 @@ def run_asr_wer(args):
     return wers
 
 
+import numpy as np
+import librosa
+
+def calculate_lsd(audio1_path, audio2_path, sr=16000, n_fft=512):
+    """
+    计算两段音频之间的 Log-Spectral Distance (LSD)
+    
+    参数:
+        audio1_path: 参考音频文件路径
+        audio2_path: 生成音频文件路径
+        sr: 采样率（默认16000 Hz）
+        n_fft: FFT窗口大小（默认512）
+    
+    返回:
+        lsd: Log-Spectral Distance 值
+    """
+    # 加载音频文件
+    audio1, _ = librosa.load(audio1_path, sr=sr)
+    audio2, _ = librosa.load(audio2_path, sr=sr)
+    
+    # 确保两段音频长度一致（截取到较短的长度）
+    min_len = min(len(audio1), len(audio2))
+    audio1 = audio1[:min_len]
+    audio2 = audio2[:min_len]
+    
+    # 计算功率谱密度 (Power Spectral Density, PSD)
+    S1 = np.abs(librosa.stft(audio1, n_fft=n_fft))**2
+    S2 = np.abs(librosa.stft(audio2, n_fft=n_fft))**2
+    
+    # 转换为对数尺度
+    log_S1 = 10 * np.log10(S1 + 1e-10)  # 防止除以零
+    log_S2 = 10 * np.log10(S2 + 1e-10)
+    
+    # 计算 LSD
+    lsd = np.sqrt(np.mean((log_S1 - log_S2)**2))
+    print(f"LSD: {lsd:.4f}")
+    return lsd
+
 # SIM Evaluation
 
 

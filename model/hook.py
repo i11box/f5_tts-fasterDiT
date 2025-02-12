@@ -40,7 +40,7 @@ def calculate_flops_hook(module, args, kwargs):
     
     # 获取当前方法和窗口大小
     method = module.steps_method[module.step]
-    window_size = module.window_size * 2
+    window_size = module.window_size * 2 if hasattr(module, 'window_size') else int(seq_len * module.window_ratio) * 2
     
     # 根据不同方法计算实际计算量
     if method == "full_attention":
@@ -170,7 +170,7 @@ def set_need_cahce_residual(transformer):
                 block.attn.need_cache_residual[stepi] = False
         block.attn.need_cache_residual[-1] = False
 
-def calibration(model, steps=32, threshold=0.1, window_size=64):
+def calibration(model, steps=32, threshold=0.1, window_ratio=0.125):
 
     print("Calibration for transformer!!!")
     transformer = model.transformer # model应该是cfm
@@ -187,16 +187,17 @@ def calibration(model, steps=32, threshold=0.1, window_size=64):
 
     hook = transformer.register_forward_pre_hook(transformer_forward_pre_hook_for_calibration, with_kwargs=True)
     transformer.loss_thresholds = loss_thresholds
+    return hook # 返回hook引用便于移除
 
-def speedup(model,delta = None, steps=32, window_size=64):
+def speedup(model,delta = None, steps=32, window_ratio=0.125):
     assert delta is not None
     print("Speedup for transformer!!!")
     transformer = model.transformer # model应该是cfm
     # 加载方法
-    path = f"{steps}_{delta}_{window_size}.json"
-    insert_wars_to_attention_forward(transformer, steps=steps, window_size=window_size, method_path = path)
+    path = f"data\\methods\\{steps}_{delta}_{window_ratio}.json"
+    insert_wars_to_attention_forward(transformer, steps=steps, window_ratio=window_ratio, method_path = path)
 
-def insert_wars_to_attention_forward(transformer, steps=32, window_size=64, method_path = None):
+def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, method_path = None):
     if method_path is None:
         methods = ["full_attention"] * len(transformer.transformer_blocks)
         output_shares = [False] * len(transformer.transformer_blocks)
@@ -204,7 +205,7 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_size=64, meth
         for block, method, output_share in zip(transformer.transformer_blocks, methods, output_shares):
             attn = block.attn
             # set some attribute
-            attn.window_size = window_size
+            attn.window_ratio = window_ratio
             attn.method = method
             attn.output_share = output_share
             attn.step = 0
@@ -222,7 +223,7 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_size=64, meth
             for methods, block in zip(saved_methods, transformer.transformer_blocks):
                 attn = block.attn
                 attn.steps_method = methods
-                attn.window_size = window_size
+                attn.window_ratio = window_ratio
                 attn.step = 0
                 attn.forward = types.MethodType(efficient_attention_forward, attn)
                 attn.need_cache_residual = [True] * steps
@@ -278,6 +279,7 @@ def efficient_attention_forward(
     value = value.view(batch_size, -1, self.heads, head_dim)
 
     # step 1，计算window_size
+    self.window_size = int(seq_len * self.window_ratio)
     w_output = flash_attn_func(query, key, value, causal=False, window_size=(-self.window_size, self.window_size))
 
     # step2，确定使用full attention还是使用wars
