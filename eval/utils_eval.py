@@ -255,9 +255,9 @@ def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path
             gen_spk_id, gen_chaptr_id, _ = gen_utt.split("-")
             gen_wav = os.path.join(librispeech_test_clean_path, gen_spk_id, gen_chaptr_id, gen_utt + ".flac")
         else:
-            if not os.path.exists(os.path.join(gen_wav_dir, gen_utt + ".wav")):
+            if not os.path.exists(os.path.join(gen_wav_dir, gen_utt + ".flac")):
                 raise FileNotFoundError(f"Generated wav not found: {gen_utt}")
-            gen_wav = os.path.join(gen_wav_dir, gen_utt + ".wav")
+            gen_wav = os.path.join(gen_wav_dir, gen_utt + ".flac")
 
         ref_spk_id, ref_chaptr_id, _ = ref_utt.split("-")
         ref_wav = os.path.join(librispeech_test_clean_path, ref_spk_id, ref_chaptr_id, ref_utt + ".flac")

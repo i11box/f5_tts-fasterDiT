@@ -1,0 +1,15 @@
+# F5-TTS评估配置文件
+
+[paths]
+lst_file = "data/LibriSpeech/librispeech_pc_test_clean_cross_sentence.lst"  # 包含句子对的lst文件路径
+output_dir = "data/LibriSpeech/test-clean_output"  # 生成音频的输出目录
+ckpt_file = ""  # 模型检查点路径
+vocab_file = ""  # 词汇表文件路径
+
+[model]
+name = "F5-TTS"  # 模型类型 (F5-TTS 或 E2-TTS)
+vocoder_name = "vocos"  # vocoder名称 (vocos 或 bigvgan)
+
+[generation]
+speed = 1.0  # 音频生成速度
+delta = None  # 校准值 (可选)

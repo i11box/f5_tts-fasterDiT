@@ -5,9 +5,6 @@ import os
 
 sys.path.append(os.getcwd())
 
-import multiprocessing as mp
-from importlib.resources import files
-
 import numpy as np
 
 from f5_tts.eval.utils_eval import (
@@ -16,16 +13,13 @@ from f5_tts.eval.utils_eval import (
     run_sim,
 )
 
-rel_path = str(files("f5_tts").joinpath("../../"))
-
-
-eval_task = "wer"  # sim | wer
+eval_task = "sim"  # sim | wer
 lang = "en"
-metalst = rel_path + "/data/librispeech_pc_test_clean_cross_sentence.lst"
-librispeech_test_clean_path = "<SOME_PATH>/LibriSpeech/test-clean"  # test-clean path
-gen_wav_dir = "PATH_TO_GENERATED"  # generated wavs
+metalst = "data\\Librispeech\\librispeech_pc_test_clean_cross_sentence.lst"
+librispeech_test_clean_path = "data\\LibriSpeech\\test-clean"  # test-clean path
+gen_wav_dir = "data\\LibriSpeech\\test-clean_output"  # generated wavs
 
-gpus = [0, 1, 2, 3, 4, 5, 6, 7]
+gpus = [0]
 test_set = get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path)
 
 ## In LibriSpeech, some speakers utilized varying voice characteristics for different characters in the book,
@@ -38,7 +32,7 @@ if local:  # use local custom checkpoint dir
 else:
     asr_ckpt_dir = ""  # auto download to cache dir
 
-wavlm_ckpt_dir = "../checkpoints/UniSpeech/wavlm_large_finetune.pth"
+wavlm_ckpt_dir = "data\\checkpoints\\wavlm_large_finetune.pth"
 
 
 # --------------------------- WER ---------------------------
@@ -46,11 +40,9 @@ wavlm_ckpt_dir = "../checkpoints/UniSpeech/wavlm_large_finetune.pth"
 if eval_task == "wer":
     wers = []
 
-    with mp.Pool(processes=len(gpus)) as pool:
-        args = [(rank, lang, sub_test_set, asr_ckpt_dir) for (rank, sub_test_set) in test_set]
-        results = pool.map(run_asr_wer, args)
-        for wers_ in results:
-            wers.extend(wers_)
+    for rank, sub_test_set in test_set:
+        wers_ = run_asr_wer((rank, lang, sub_test_set, asr_ckpt_dir))
+        wers.extend(wers_)
 
     wer = round(np.mean(wers) * 100, 3)
     print(f"\nTotal {len(wers)} samples")
@@ -62,11 +54,9 @@ if eval_task == "wer":
 if eval_task == "sim":
     sim_list = []
 
-    with mp.Pool(processes=len(gpus)) as pool:
-        args = [(rank, sub_test_set, wavlm_ckpt_dir) for (rank, sub_test_set) in test_set]
-        results = pool.map(run_sim, args)
-        for sim_ in results:
-            sim_list.extend(sim_)
+    for rank, sub_test_set in test_set:
+        sim_ = run_sim((rank, sub_test_set, wavlm_ckpt_dir))
+        sim_list.extend(sim_)
 
     sim = round(sum(sim_list) / len(sim_list), 3)
     print(f"\nTotal {len(sim_list)} samples")

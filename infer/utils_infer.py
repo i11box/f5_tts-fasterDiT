@@ -290,6 +290,7 @@ def remove_silence_edges(audio, silence_threshold=-42):
 
 def preprocess_ref_audio_text(ref_audio_orig, ref_text, clip_short=True, show_info=print, device=device):
     show_info("Converting audio...")
+    print(ref_audio_orig)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
         aseg = AudioSegment.from_file(ref_audio_orig)
 
@@ -502,12 +503,12 @@ def infer_batch_process(
 
             total_full_ops,total_efficient_ops = 0,0
             
-            for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
-                print(f'块{blocki}原需ops: {round(block.attn.full_ops/1e9, 4)}G，加速后ops: {round(block.attn.efficient_ops/1e9, 4)}G')
-                total_full_ops += block.attn.full_ops
-                total_efficient_ops += block.attn.efficient_ops
+            # for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
+            #     print(f'块{blocki}原需ops: {round(block.attn.full_ops/1e9, 4)}G，加速后ops: {round(block.attn.efficient_ops/1e9, 4)}G')
+            #     total_full_ops += block.attn.full_ops
+            #     total_efficient_ops += block.attn.efficient_ops
                 
-            print(f'总原需ops: {round(total_full_ops/1e9, 4)}G，加速后ops: {round(total_efficient_ops/1e9, 4)}G')
+            # print(f'总原需ops: {round(total_full_ops/1e9, 4)}G，加速后ops: {round(total_efficient_ops/1e9, 4)}G')
             
             for hook in hooks:
                 hook.remove()

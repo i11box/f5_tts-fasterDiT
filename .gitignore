@@ -8,10 +8,9 @@
 *.flac
 *.pt
 *.png
-
 # windsurf rules
 .windsurfrules
-
+data
 *.png
 *.pdf
 .windsurfrules
