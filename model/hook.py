@@ -191,7 +191,7 @@ def calibration(model, steps=32, threshold=0.1, window_ratio=0.125):
 
 def speedup(model,delta = None, steps=32, window_ratio=0.125):
     assert delta is not None
-    print("Speedup for transformer!!!")
+    # print("Speedup for transformer!!!")
     transformer = model.transformer # model应该是cfm
     # 加载方法
     path = f"data\\methods\\{steps}_{delta}_{window_ratio}.json"

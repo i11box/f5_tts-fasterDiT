@@ -124,11 +124,6 @@ def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=dev
             state_dict.update(encodec_parameters)
         vocoder.load_state_dict(state_dict)
         vocoder = vocoder.eval().to(device)
-        #-------------------------调试日志----------------------------
-        logger = Logger()
-        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-        logger.info(f'Vocos loaded, device: {device}')
-        #----------------------------------------------------------------
     elif vocoder_name == "bigvgan":
         try:
             from third_party.BigVGAN import bigvgan
@@ -391,7 +386,7 @@ def infer_process(
     for i, gen_text in enumerate(gen_text_batches):
         print(f"gen_text {i}", gen_text)
 
-    show_info(f"Generating audio in {len(gen_text_batches)} batches...")
+    # show_info(f"Generating audio in {len(gen_text_batches)} batches...")
     return infer_batch_process(
         (audio, sr),
         ref_text,

@@ -2,6 +2,7 @@ import math
 import os
 import random
 import string
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -261,6 +262,8 @@ def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path
 
         ref_spk_id, ref_chaptr_id, _ = ref_utt.split("-")
         ref_wav = os.path.join(librispeech_test_clean_path, ref_spk_id, ref_chaptr_id, ref_utt + ".flac")
+        # gen_spk_id, gen_chaptr_id, _ = gen_utt.split("-")
+        # ref_wav = os.path.join(librispeech_test_clean_path, gen_spk_id, gen_chaptr_id, gen_utt + ".flac")
 
         test_set_.append((gen_wav, ref_wav, gen_txt))
 
@@ -324,7 +327,8 @@ def run_asr_wer(args):
 
     from jiwer import compute_measures
 
-    for gen_wav, prompt_wav, truth in tqdm(test_set):
+    index = 1
+    for gen_wav, prompt_wav, truth in test_set:
         if lang == "zh":
             res = asr_model.generate(input=gen_wav, batch_size_s=300, disable_pbar=True)
             hypo = res[0]["text"]
@@ -361,6 +365,11 @@ def run_asr_wer(args):
         # inse = measures["insertions"] / len(ref_list)
 
         wers.append(wer)
+        print(f"{index}/{len(test_set)}: {wer}")
+
+        index += 1
+    
+    print(f'本批WER: {round(np.mean(wers) * 100, 3)}')
 
     return wers
 
@@ -408,6 +417,7 @@ def calculate_lsd(audio1_path, audio2_path, sr=16000, n_fft=512):
 
 def run_sim(args):
     rank, test_set, ckpt_dir = args
+    logger = logging.getLogger("eval")
     device = f"cuda:{rank}"
 
     model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type="wavlm_large", config_path=None)
@@ -420,7 +430,8 @@ def run_sim(args):
     model.eval()
 
     sim_list = []
-    for wav1, wav2, truth in tqdm(test_set):
+    i = 0
+    for wav1, wav2, truth in test_set:
         wav1, sr1 = torchaudio.load(wav1)
         wav2, sr2 = torchaudio.load(wav2)
 
@@ -438,6 +449,10 @@ def run_sim(args):
 
         sim = F.cosine_similarity(emb1, emb2)[0].item()
         # print(f"VSim score between two audios: {sim:.4f} (-1.0, 1.0).")
+        logger.info(f"{i}/{len(test_set)}: {sim:.4f}")
         sim_list.append(sim)
+        i += 1
 
+    sim = round(sum(sim_list) / len(sim_list), 3)
+    print(f'本批SIM: {sim}')
     return sim_list

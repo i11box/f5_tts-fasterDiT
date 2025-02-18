@@ -2,6 +2,8 @@ import os
 from pathlib import Path
 import soundfile as sf
 import tomli
+import torch
+import time
 
 from f5_tts.infer.infer_cli import infer_process, load_model, load_vocoder, DiT
 from cached_path import cached_path
@@ -20,9 +22,20 @@ def ensure_dir(dir_path):
     os.makedirs(dir_path, exist_ok=True)
 
 def process_sentence_pair(src_info, tgt_info, model, vocoder, output_dir, speed, delta=None):
-    """处理一对句子，生成音频并保存"""
+    """处理一对句子，生成音频并保存
+    
+    Returns:
+        tuple: (推理时间(秒), 音频时长(秒))
+    """
     ensure_dir(output_dir)
     output_path = f"{output_dir}/{tgt_info['id']}.flac"
+    
+    # 只对infer_process计时
+    torch.cuda.synchronize()
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+    start_event.record()
+    
     # 生成目标句子音频
     audio,final_sample_rate, _ = infer_process(
         ref_audio=src_info['audio_path'],
@@ -35,9 +48,17 @@ def process_sentence_pair(src_info, tgt_info, model, vocoder, output_dir, speed,
         delta = delta
     )
     
+    end_event.record()
+    torch.cuda.synchronize()
+    infer_time = start_event.elapsed_time(end_event) / 1000.0  # 转换为秒
+    
     with open(output_path,"wb") as f:
         sf.write(f.name, audio, final_sample_rate)
     
+    # 计算音频时长(秒)
+    audio_duration = len(audio) / final_sample_rate
+    
+    return infer_time, audio_duration
 
 def main():
     config_path = 'eval/config/eval_config.toml'
@@ -59,7 +80,7 @@ def main():
             },
             "generation": {
                 "speed": 1.0,
-                "delta": 0.2
+                "delta": None
             }
         }
     
@@ -104,6 +125,10 @@ def main():
         lines = f.readlines()
     
     # 处理每一对句子
+    processed_pairs = 0
+    total_audio_duration = 0.0
+    total_infer_time = 0.0
+    
     for i, line in enumerate(lines):
         try:
             # 解析行
@@ -112,7 +137,6 @@ def main():
             # 构建音频路径
             src_audio_path = f"data/LibriSpeech/test-clean/{src_id.split('-')[0]}/{src_id.split('-')[1]}/{src_id}.flac"
             tgt_audio_path = output_dir
-            # os.makedirs(os.path.dirname(tgt_audio_path), exist_ok=True)
             
             # 准备句子信息
             src_info = {
@@ -130,15 +154,26 @@ def main():
             }
             
             # 处理这对句子
-            process_sentence_pair(
+            infer_time, audio_duration = process_sentence_pair(
                 src_info, tgt_info, model, vocoder, tgt_audio_path, speed,delta
             )
             
-            print(f"Processed pair {i}/{len(lines)}: {src_id} -> {tgt_id}")
+            # 累加统计
+            total_infer_time += infer_time
+            total_audio_duration += audio_duration
+            processed_pairs += 1
+            
+            print(f"Processed pair {i}/{len(lines)}: {src_id} -> {tgt_id} (infer: {infer_time:.2f}s, audio: {audio_duration:.2f}s)")
             
         except Exception as e:
             print(f"Error processing line {i}: {e}")
             continue
+    
+    # 打印统计信息
+    print(f'\n共处理完成{processed_pairs}对句子:')
+    print(f'总推理时间: {total_infer_time:.2f} 秒')
+    print(f'生成音频总时长: {total_audio_duration:.2f} 秒')
+    print(f'实时率 RTF: {total_infer_time/total_audio_duration:.4f}')
 
 if __name__ == "__main__":
     main()
