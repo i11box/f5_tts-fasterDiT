@@ -235,10 +235,6 @@ class CFM(nn.Module):
 			out = out.permute(0, 2, 1)
 			out = vocoder(out)
 
-		#-----------保存策略文件时取消注释--------------
-		#self.transformer.save_compression_strategies('C:\\Users\\ASUS\\scoop\\apps\\python\\current\\Lib\\site-packages\\f5_tts\\method0.025.json')
-		#---------------------------------------------------------
-
 		return out, trajectory
 
 	# 校准

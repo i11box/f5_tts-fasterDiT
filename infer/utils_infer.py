@@ -468,11 +468,11 @@ def infer_batch_process(
             calibrate_hook = None
             if calibration_mode:
                 # 如果是校准模式，调用calibrate方法
-                calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)
+                calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.07)#w
             elif calibration_mode is False and delta is not None:
-                speedup(model_obj, steps = nfe_step, window_ratio=0.125, delta=delta)
+                speedup(model_obj, steps = nfe_step, window_ratio=0.07, delta=delta)#w
             else:
-                insert_wars_to_attention_forward(model_obj.transformer,steps = nfe_step, window_ratio=0.125)
+                insert_wars_to_attention_forward(model_obj.transformer,steps = nfe_step, window_ratio=0.07)#w
                 
             # 统计计算的钩子
             hooks = []
@@ -518,7 +518,7 @@ def infer_batch_process(
                     to_save_methods['methods'].append(block.attn.steps_method)
                     to_save_methods['need_residual'].append(block.attn.need_cache_residual)
 
-                with open(f"data\\methods\\{nfe_step}_{delta}_0.125.json", 'w') as file:
+                with open(f"data\\methods\\{nfe_step}_{delta}_0.07.json", 'w') as file: #w
                     import json
                     file.write(json.dumps(to_save_methods))
 

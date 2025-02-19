@@ -2,7 +2,7 @@
 model = "F5-TTS"
 ref_audio = "infer/examples/basic/test_1.wav"
 # If an empty "", transcribes the reference audio automatically.
-ref_text = "你在哪里呐！我已经到家了。"
+ref_text = "吃什么？吃什么呀？有没有推荐的？"
 # gen_text = "我是奶龙，我是奶龙。" # 10字
 # gen_text = "两只老虎，两只老虎，跑得快，跑得快，一只没有眼睛，一只没有" # 30字
 gen_text = "大斧VS，VK哥，你们知道吗？VK哥在诶罗格斯冠军赛前回应，大斧。如今我整装待发，充满正能量，让我们奔跑吧！C那帕克斯！你懂我的意思吗？" # 70字

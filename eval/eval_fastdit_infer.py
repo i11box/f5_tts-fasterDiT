@@ -80,7 +80,7 @@ def main():
             },
             "generation": {
                 "speed": 1.0,
-                "delta": None
+                "delta": 0.2
             }
         }
     

@@ -413,7 +413,7 @@ class AttnProcessor:
         """创建滑动窗口掩码
         Args:
             seq_len: 序列长度
-            window_ratio: 窗口比例,default 0.125
+            window_ratio: 窗口比例,default 0.25
         """
         mask = None
         if window_ratio is None:

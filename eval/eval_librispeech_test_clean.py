@@ -13,7 +13,7 @@ from f5_tts.eval.utils_eval import (
     run_sim,
 )
 
-eval_task = "wer"  # sim | wer
+eval_task = "sim"  # sim | wer
 lang = "en"
 metalst = "data\\Librispeech\\librispeech_pc_test_clean_cross_sentence.lst"
 librispeech_test_clean_path = "data\\LibriSpeech\\test-clean"  # test-clean path
