@@ -170,7 +170,7 @@ def set_need_cahce_residual(transformer):
                 block.attn.need_cache_residual[stepi] = False
         block.attn.need_cache_residual[-1] = False
 
-def calibration(model, steps=32, threshold=0.1, window_ratio=0.07):#w
+def calibration(model, steps=32, threshold=0.1, window_ratio=0.125):#w
 
     print("Calibration for transformer!!!")
     transformer = model.transformer # model应该是cfm
@@ -189,7 +189,7 @@ def calibration(model, steps=32, threshold=0.1, window_ratio=0.07):#w
     transformer.loss_thresholds = loss_thresholds
     return hook # 返回hook引用便于移除
 
-def speedup(model,delta = None, steps=32, window_ratio=0.07):#w
+def speedup(model,delta = None, steps=32, window_ratio=0.125):#w
     assert delta is not None
     # print("Speedup for transformer!!!")
     transformer = model.transformer # model应该是cfm
@@ -197,7 +197,7 @@ def speedup(model,delta = None, steps=32, window_ratio=0.07):#w
     path = f"data\\methods\\{steps}_{delta}_{window_ratio}.json"
     insert_wars_to_attention_forward(transformer, steps=steps, window_ratio=window_ratio, method_path = path)
 
-def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.07, method_path = None):#w
+def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, method_path = None):#w
     if method_path is None:
         methods = ["full_attention"] * len(transformer.transformer_blocks)
         output_shares = [False] * len(transformer.transformer_blocks)
