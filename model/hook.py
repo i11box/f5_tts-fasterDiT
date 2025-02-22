@@ -325,3 +325,52 @@ def efficient_attention_forward(
     self.step += 1
     
     return x
+
+def save_block_output_hook(module, args, kwargs, output):
+    """保存DiTBlock输出的钩子函数"""
+    # 获取当前时间步
+    step = module.attn.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    if block_id == 0:
+        print(f'当前时间步{step}')
+    # 构建保存路径
+    save_dir = "data/block_outputs"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
+    
+    # 保存输出
+    torch.save(output.detach().cpu(), save_path)
+    return output
+
+def save_attn_weight_forward_pre_hook(module, args, kwargs):
+    """保存Attention权重的前向钩子函数"""
+    # 获取当前时间步
+    step = module.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    
+    # 构建保存路径
+    save_dir = "attn_weights"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
+    
+    # 保存权重
+    x = kwargs['x']
+    mask = kwargs.get('mask', None)
+    
+    query = module.to_q(x)
+    key = module.to_k(x)
+    
+    inner_dim = key.shape[-1]
+    attn_weights = query @ key.transpose(-2,-1) / math.sqrt(inner_dim)
+    if mask is not None:
+        attn_weights = attn_weights.masked_fill(~mask, 0.0)
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    torch.save(attn_weights.detach().cpu(), save_path)
