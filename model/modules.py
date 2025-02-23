@@ -668,22 +668,6 @@ class DiTBlock(nn.Module):
         
         x = x + gate_mlp.unsqueeze(1) * ff_output
         
-        #---------------------------输出保存(记得删)
-        step = self.attn.step
-        # 获取block索引
-        if not hasattr(self, 'block_id'):
-            raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
-        block_id = self.block_id
-        if block_id == 0:
-            print(f'当前时间步{step}')
-        # 构建保存路径
-        save_dir = "data/block_outputs"
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
-        
-        # 保存输出
-        torch.save(x.detach().cpu(), save_path)
-        #---------------------------输出保存(记得删)
         return x
 
 
