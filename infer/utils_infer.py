@@ -504,7 +504,7 @@ def infer_batch_process(
             total_full_ops,total_efficient_ops = 0,0
             
             # for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
-            #     print(f'块{blocki}原需ops: {round(block.attn.full_ops/1e9, 4)}G，加速后ops: {round(block.attn.efficient_ops/1e9, 4)}G')
+                #     print(f'块{blocki}原需ops: {round(block.attn.full_ops/1e9, 4)}G，加速后ops: {round(block.attn.efficient_ops/1e9, 4)}G')
             #     total_full_ops += block.attn.full_ops
             #     total_efficient_ops += block.attn.efficient_ops
                 
