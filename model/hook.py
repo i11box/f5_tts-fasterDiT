@@ -45,15 +45,19 @@ def calculate_flops_hook(module, args, kwargs):
     # 根据不同方法计算实际计算量
     if method == "full_attention":
         if module.need_cache_residual[module.step]:
-            base_ops *= 1 + window_size / seq_len
+            # base_ops *= 1 + window_size / seq_len
+            base_ops *= 1.1225
     elif method == "ASC":
         base_ops = base_ops / 2
         if module.need_cache_residual[module.step]:
-            base_ops *= 1 + window_size / seq_len
+            # base_ops *= 1 + window_size / seq_len
+            base_ops *= 1.1225
     elif method == 'wars':
-        base_ops *= window_size / seq_len
+        # base_ops *= window_size / seq_len
+        base_ops *= 0.1225
     elif method == 'wars+ASC':
-        base_ops = base_ops * window_size / seq_len / 2
+        # base_ops = base_ops * window_size / seq_len / 2
+        base_ops = base_ops * 0.1225 / 2
     elif method == "AST":
         base_ops = 0
     
@@ -89,7 +93,8 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
-    method_candidates = ['AST', 'wars+ASC', 'wars', 'ASC']
+    method_candidates = ['AST','wars+ASC','wars', 'ASC']
+    #method_candidates = ['wars']
     if not hasattr(model, 'total_pbar'):
         total_steps = 32 * total_blocks * len(method_candidates)
         model.total_pbar = tqdm(
@@ -234,6 +239,51 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             set_need_cahce_residual(transformer)
             
 
+def sampled_attention(query, key, value, sample_ratio=0.25, window_size=None):
+    """采样注意力计算
+    
+    Args:
+        query: [batch_size, seq_len, heads, head_dim]
+        key: [batch_size, seq_len, heads, head_dim] 
+        value: [batch_size, seq_len, heads, head_dim]
+        sample_ratio: 采样比例
+        window_size: 窗口大小,如果提供则在窗口内采样
+    """
+    batch_size, seq_len, num_heads, head_dim = query.shape
+    
+    if window_size is not None:
+        # 直接使用flash_attn_func的window_size参数
+        w_size = int(window_size * sample_ratio)
+        output = flash_attn_func(
+            query, key, value,
+            causal=False,
+            window_size=(-w_size, w_size)
+        )
+    else:
+        # 均匀采样
+        sampled_size = int(seq_len * sample_ratio)
+        stride = max(1, seq_len // sampled_size)  # 计算步长，至少为1
+
+        # 随机起始点 (0~stride-1之间)
+        start = 0
+
+        # 生成均匀分布的索引
+        indices = (start + torch.arange(sampled_size, device=query.device) * stride)
+        indices = torch.clamp(indices, max=seq_len-1).long()  # 限制索引范围
+
+        # 稀疏注意力计算
+        sparse_output = flash_attn_func(
+            query[:, indices], 
+            key[:, indices], 
+            value[:, indices]
+        )
+
+        # 映射到原始序列
+        output = torch.zeros_like(query)
+        output[:, indices] = sparse_output  # 仅采样位置有值
+    
+    return output
+
 def efficient_attention_forward(
     self,
     x: float, 
@@ -278,11 +328,17 @@ def efficient_attention_forward(
     key = key.view(batch_size, -1, self.heads, head_dim)
     value = value.view(batch_size, -1, self.heads, head_dim)
 
-    # step 1，计算window_size
+    # 计算window_size
     self.window_size = int(seq_len * self.window_ratio)
-    w_output = flash_attn_func(query, key, value, causal=False, window_size=(-self.window_size, self.window_size))
+    
+    # 使用采样注意力,采样25%的点进行计算
+    w_output = sampled_attention(
+        query, key, value,
+        sample_ratio=0.35,
+        window_size=None
+    )
 
-    # step2，确定使用full attention还是使用wars
+    # 根据不同方法处理输出
     if 'full_attention' in method:
         # 默认使用了full_attention就一定会计算residual
         f_output = flash_attn_func(query, key, value, causal=False)

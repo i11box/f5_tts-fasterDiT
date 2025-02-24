@@ -35,7 +35,72 @@ def show_data(data):
     plt.figure(figsize=(10, 8))
     sns.heatmap(data, cmap='YlOrRd', xticklabels=False, yticklabels=False)
     plt.show()
+
+def count_block_changes(block_outputs_dir_src, block_outputs_dir_dst, output_dir=None):
+    """统计矩阵中变化超过9%的点的占比,计算均值和方差"""
     
+    # 检查是否有可用的 GPU
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
+    
+    # 用于存储统计结果
+    cond_changes = []
+    uncond_changes = []
+    
+    # 遍历 block_outputs 目录下的所有文件
+    total_steps = 22 * 31
+    with tqdm(total=total_steps, desc="Processing blocks") as pbar:
+        for block_id in range(22):
+            print(f"Processing block {block_id}")
+            for step in range(1,31):
+                filename = f"block_{block_id}_step_{step}.pt"
+                # 加载数据
+                src_block_data = torch.load(os.path.join(block_outputs_dir_src, filename), map_location=device)
+                dst_block_data = torch.load(os.path.join(block_outputs_dir_dst, filename), map_location=device)
+
+                # 分为有条件和无条件的两部分
+                src_block_data_cond , src_block_data_uncond = src_block_data[0], src_block_data[1]
+                dst_block_data_cond , dst_block_data_uncond = dst_block_data[0], dst_block_data[1]
+
+                # 转换为张量并确保在 GPU 上
+                if isinstance(src_block_data, torch.Tensor):
+                    src_block_data = src_block_data.to(device)
+                if isinstance(dst_block_data, torch.Tensor):
+                    dst_block_data = dst_block_data.to(device)
+            
+                # 计算变化百分比
+                cond_change_matrix = calculate_change_percentage(src_block_data_cond, dst_block_data_cond)
+                uncond_change_matrix = calculate_change_percentage(src_block_data_uncond, dst_block_data_uncond)
+                
+                # 统计变化超过9%的点的占比
+                cond_significant_changes = np.sum(cond_change_matrix > 0.9) / cond_change_matrix.size
+                uncond_significant_changes = np.sum(uncond_change_matrix > 0.9) / uncond_change_matrix.size
+                
+                # 记录结果
+                cond_changes.append(cond_significant_changes)
+                uncond_changes.append(uncond_significant_changes)
+                
+                pbar.update(1)
+    
+    # 计算统计结果
+    cond_changes = np.array(cond_changes)
+    uncond_changes = np.array(uncond_changes)
+    
+    # 计算均值和标准差
+    cond_mean = np.mean(cond_changes)
+    cond_std = np.std(cond_changes)
+    uncond_mean = np.mean(uncond_changes)
+    uncond_std = np.std(uncond_changes)
+    
+    print("\n统计结果:")
+    print(f"条件部分:")
+    print(f"  变化超过2%的点的占比:")
+    print(f"    均值: {cond_mean:.4f}")
+    print(f"    标准差: {cond_std:.4f}")
+    print(f"非条件部分:")
+    print(f"  变化超过9%的点的占比:")
+    print(f"    均值: {uncond_mean:.4f}")
+    print(f"    标准差: {uncond_std:.4f}")
 
 def visualize_block_changes(block_outputs_dir_src, block_outputs_dir_dst, output_dir):
     """主函数：处理数据并生成热力图"""
@@ -91,4 +156,4 @@ if __name__ == "__main__":
     output_dir = "assets/block_changes_compress_0.2"
 
     # 运行可视化
-    visualize_block_changes(block_outputs_dir_src, block_outputs_dir_dst, output_dir)
+    count_block_changes(block_outputs_dir_src, block_outputs_dir_dst)
