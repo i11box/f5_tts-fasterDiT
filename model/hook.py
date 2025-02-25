@@ -44,22 +44,20 @@ def calculate_flops_hook(module, args, kwargs):
     
     cond_op = deepcopy(base_ops)
     uncond_op = deepcopy(base_ops)
-    cond_op,uncond_op = cond_op /2, uncond_op /2
-    
+    op = [cond_op /2, uncond_op /2]
     
     # 根据不同方法计算实际计算量
-    for i,op in enumerate([cond_op,uncond_op]):
+    for i in range(2):
         if method[i] == "full_attention":
             if module.need_cache_residual[module.step][i]:
-                op *= 1 + window_size / seq_len
+                op[i] *= 1 + window_size / seq_len
         elif method[i] == 'wars':
-            op *= window_size / seq_len
+            op[i] *= window_size / seq_len
         elif method[i] == "ast" or method[i] == 'asc':
-            op = 0
+            op[i] = 0
     
     # 记录实际计算量
-    module.efficient_ops += cond_op
-    module.efficient_ops += uncond_op
+    module.efficient_ops += op[0] + op[1]
 
 """
 计算raw output与efficient output之间的差距，使用默认值计算Loss
@@ -90,28 +88,28 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
-    # method_candidates = [
-    #     ['ast', 'ast'],
-    #     ['ast', 'asc'],
-    #     ['asc', 'ast'],
-    #     ['ast', 'wars'],
-    #     ['wars', 'ast'],
-    #     ['wars','asc'],
-    #     ['asc','wars'],
-    #     ['wars', 'wars'],
-    #     ['full_attention', 'ast'],
-    #     ['ast','full_attention'],
-    #     ['full_attention', 'asc'],
-    #     ['asc', 'full_attention'],
-    #     ['wars', 'full_attention'],
-    #     ['full_attention', 'wars'],
-    # ]
     method_candidates = [
         ['ast', 'ast'],
+        ['ast', 'asc'],
+        ['asc', 'ast'],
+        ['ast', 'wars'],
+        ['wars', 'ast'],
         ['wars','asc'],
+        ['asc','wars'],
         ['wars', 'wars'],
+        ['full_attention', 'ast'],
+        ['ast','full_attention'],
         ['full_attention', 'asc'],
+        ['asc', 'full_attention'],
+        ['wars', 'full_attention'],
+        ['full_attention', 'wars'],
     ]
+    # method_candidates = [
+    #     ['ast', 'ast'],
+    #     ['wars','asc'],
+    #     ['wars', 'wars'],
+    #     ['full_attention', 'asc'],
+    # ]
     # method_candidates = [
     #     ['ast', 'ast'],
     #     ['full_attention','ast'],
