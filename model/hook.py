@@ -106,20 +106,20 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     #     ['wars', 'full_attention'],
     #     ['full_attention', 'wars'],
     # ]
-    # method_candidates = [
-    #     ['ast', 'ast'],
-    #     ['wars','asc'],
-    #     ['wars', 'wars'],
-    #     ['full_attention', 'asc'],
-    # ]
     method_candidates = [
         ['ast', 'ast'],
-        ['full_attention','ast'],
-        ['ast','full_attention'],
+        ['wars','asc'],
         ['wars', 'wars'],
-        ['full_attention','wars'],
-        ['wars','full_attention'],
+        ['full_attention', 'asc'],
     ]
+    # method_candidates = [
+    #     ['ast', 'ast'],
+    #     ['full_attention','ast'],
+    #     ['ast','full_attention'],
+    #     ['wars', 'wars'],
+    #     ['full_attention','wars'],
+    #     ['wars','full_attention'],
+    # ]
     # method_candidates = [
     #     ['ast', 'ast'],
     #     ['wars', 'wars'],
@@ -278,14 +278,6 @@ def efficient_attention_forward(
     batch_size = x.shape[0] // 2  # 总batch size的一半，用于分割条件和无条件部分
     outputs = []
     
-    # 确保x在GPU上
-    if not x.is_cuda:
-        x = x.cuda()
-    assert x.device.type == 'cuda', f"x must be on GPU, but got {x.device}"
-    dtype = next(self.parameters()).dtype
-    x = x.to(dtype=dtype)
-    device = x.device
-    
     # 分别处理条件和无条件部分
     x_cond = x[:batch_size]  # 条件部分
     x_uncond = x[batch_size:]  # 无条件部分
@@ -335,6 +327,9 @@ def efficient_attention_forward(
             # 计算full attention和residual
             f_output = flash_attn_func(query, key, value, causal=False)
             w_residual = f_output - w_output
+            
+            device = w_output.device
+            dtype = w_output.dtype
             
             # 缓存residual如果需要
             if self.need_cache_residual[self.step][i]:
@@ -391,15 +386,9 @@ def efficient_attention_forward(
         if asc_index == 0:
             if self.need_cache_output[self.step][0]:
                 self.cached_output[:batch_size] = output_copy
-            if self.need_cache_residual[self.step][0]:
-                residual_copy = self.cached_residual[batch_size:].clone()
-                self.cached_residual[:batch_size] = residual_copy
         else:
             if self.need_cache_output[self.step][1]:
                 self.cached_output[batch_size:] = output_copy
-            if self.need_cache_residual[self.step][1]:
-                residual_copy = self.cached_residual[:batch_size].clone()
-                self.cached_residual[batch_size:] = residual_copy
     
     # 合并条件和无条件输出
     x = torch.cat(outputs, dim=0)
