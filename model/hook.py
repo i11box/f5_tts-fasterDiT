@@ -45,19 +45,15 @@ def calculate_flops_hook(module, args, kwargs):
     # 根据不同方法计算实际计算量
     if method == "full_attention":
         if module.need_cache_residual[module.step]:
-            # base_ops *= 1 + window_size / seq_len
-            base_ops *= 1.1225
+            base_ops *= (1 + window_size / seq_len + 0.01)
     elif method == "ASC":
         base_ops = base_ops / 2
         if module.need_cache_residual[module.step]:
-            # base_ops *= 1 + window_size / seq_len
-            base_ops *= 1.1225
+            base_ops *= (1 + window_size / seq_len + 0.01)
     elif method == 'wars':
-        # base_ops *= window_size / seq_len
-        base_ops *= 0.1225
+        base_ops *= (window_size / seq_len + 0.01)
     elif method == 'wars+ASC':
-        # base_ops = base_ops * window_size / seq_len / 2
-        base_ops = base_ops * 0.1225 / 2
+        base_ops = base_ops * (window_size / seq_len + 0.01) / 2
     elif method == "AST":
         base_ops = 0
     
@@ -239,7 +235,7 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             set_need_cahce_residual(transformer)
             
 
-def sampled_attention(query, key, value, sample_ratio=0.25, window_size=None):
+def sampled_attention(query, key, value, sample_ratio=0.125, window_size=None,mode = 'window',random_ratio = 0.01):
     """采样注意力计算
     
     Args:
@@ -248,10 +244,14 @@ def sampled_attention(query, key, value, sample_ratio=0.25, window_size=None):
         value: [batch_size, seq_len, heads, head_dim]
         sample_ratio: 采样比例
         window_size: 窗口大小,如果提供则在窗口内采样
+        mode: 采样模式，可选'window'、'uniform'、'dialected'或'window + uniform'
     """
     batch_size, seq_len, num_heads, head_dim = query.shape
+    device = query.device
+    dtype = query.dtype
+    output = None
     
-    if window_size is not None:
+    if window_size is not None and mode == 'window':
         # 直接使用flash_attn_func的window_size参数
         w_size = int(window_size * sample_ratio)
         output = flash_attn_func(
@@ -259,7 +259,7 @@ def sampled_attention(query, key, value, sample_ratio=0.25, window_size=None):
             causal=False,
             window_size=(-w_size, w_size)
         )
-    else:
+    elif mode == 'uniform':
         # 均匀采样
         sampled_size = int(seq_len * sample_ratio)
         stride = max(1, seq_len // sampled_size)  # 计算步长，至少为1
@@ -268,7 +268,7 @@ def sampled_attention(query, key, value, sample_ratio=0.25, window_size=None):
         start = 0
 
         # 生成均匀分布的索引
-        indices = (start + torch.arange(sampled_size, device=query.device) * stride)
+        indices = (start + torch.arange(sampled_size, device=device) * stride)
         indices = torch.clamp(indices, max=seq_len-1).long()  # 限制索引范围
 
         # 稀疏注意力计算
@@ -281,7 +281,84 @@ def sampled_attention(query, key, value, sample_ratio=0.25, window_size=None):
         # 映射到原始序列
         output = torch.zeros_like(query)
         output[:, indices] = sparse_output  # 仅采样位置有值
-    
+    elif mode == 'dialected':
+        # 计算膨胀步长
+        dilation = max(1, int(1 / sample_ratio))
+        
+        # 生成dilated采样位置
+        base_indices = torch.arange(0, seq_len, dilation, device=device)
+        
+        # 为每个采样位置构建局部窗口
+        all_indices = []
+        for idx in base_indices:
+            # 计算窗口范围
+            window_start = max(0, idx - window_size)
+            window_end = min(seq_len, idx + window_size + 1)
+            window_indices = torch.arange(window_start, window_end, device=device)
+            all_indices.append(window_indices)
+        
+        # 合并所有索引并去重
+        indices = torch.unique(torch.cat(all_indices))
+        
+        # 计算稀疏注意力
+        sparse_output = flash_attn_func(
+            query[:, indices],
+            key[:, indices], 
+            value[:, indices],
+            causal=False
+        )
+        
+        # 映射回原始序列
+        output = torch.zeros_like(query)
+        output[:, indices] = sparse_output
+    elif mode == 'window + uniform':
+        # 1. 计算窗口注意力
+        w_size = window_size
+        window_output = flash_attn_func(
+            query, key, value,
+            causal=False,
+            window_size=(-w_size, w_size)
+        )
+        
+        # 创建窗口掩码
+        # 创建基础掩码矩阵 (seq_len, seq_len)
+        base_mask = torch.zeros((seq_len, seq_len), dtype=torch.float16, device=device)
+        for i in range(seq_len):
+            start = max(0, i - window_size)
+            end = min(seq_len - 1, i + window_size)
+            base_mask[i,start:end + 1] = 1  # 设置有效区域为1
+
+        # 扩展基础掩码到 (batch_size, seq_len, seq_len)
+        base_mask = base_mask.unsqueeze(0).expand(batch_size, seq_len, seq_len)
+
+        # 创建一个全1矩阵 (batch_size, seq_len, heads * dim_per_head)
+        ones_matrix = torch.ones((batch_size, seq_len, num_heads * head_dim), dtype=torch.float16, device=device)
+        # 通过广播机制生成最终掩码 (batch_size, seq_len, heads, dim_per_head)
+        mask = base_mask @ ones_matrix
+        mask = mask.view(batch_size, seq_len, num_heads, head_dim)  
+        
+        # 2. 计算均匀采样注意力
+        sampled_size = int(seq_len * random_ratio)
+        stride = max(1, seq_len // sampled_size)  # 计算步长，至少为1
+        
+        # 生成均匀分布的索引
+        indices = torch.arange(sampled_size, device=device) * stride
+        indices = torch.clamp(indices, max=seq_len-1).long()  # 限制索引范围
+        
+        # 计算均匀采样的注意力
+        uniform_output = flash_attn_func(
+            query[:, indices],
+            key[:, indices],
+            value[:, indices],
+            causal=False
+        )
+        
+        # 将均匀采样注意力结果映射回原始序列长度
+        uniform_output_full = torch.zeros_like(query)
+        uniform_output_full[:, indices] = uniform_output
+        
+        output = window_output + uniform_output_full * (1 - mask)
+        
     return output
 
 def efficient_attention_forward(
@@ -334,8 +411,10 @@ def efficient_attention_forward(
     # 使用采样注意力,采样25%的点进行计算
     w_output = sampled_attention(
         query, key, value,
-        sample_ratio=0.35,
-        window_size=None
+        sample_ratio=0.125,
+        window_size=self.window_size,
+        mode='window + uniform',  # 修改为正确的mode
+        random_ratio=0.01
     )
 
     # 根据不同方法处理输出
