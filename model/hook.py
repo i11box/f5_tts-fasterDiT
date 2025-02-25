@@ -293,7 +293,7 @@ def efficient_attention_forward(
     elif 'wars' in method:
         assert hasattr(self, 'cached_residual'), "必须要先过Full attention产生Residual output才能使用Wars"
         output = w_output + self.cached_residual[:batch_size]
-    elif 'ASC' in method:
+    elif 'ASC' in method and 'wars' not in method:
         f_output = flash_attn_func(query, key, value, causal=False)
         w_residual = f_output-w_output
         if self.need_cache_residual[self.step]:
