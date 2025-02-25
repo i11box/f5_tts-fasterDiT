@@ -25,6 +25,7 @@ from f5_tts.model.hook import (
     calculate_flops_hook,
     insert_wars_to_attention_forward,
     save_attn_weight_forward_pre_hook,
+    save_attn_key_forward_pre_hook
 )
 matplotlib.use("Agg")
 
@@ -487,9 +488,9 @@ def infer_batch_process(
                 # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
                 hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
                 hooks.append(hook)
-                #hook_for_attn = block.register_forward_hook(save_block_output_hook,with_kwargs=True)
-                # hook_for_attn = block.attn.register_forward_pre_hook(save_attn_weight_forward_pre_hook,with_kwargs=True)
-                # hooks.append(hook_for_attn)
+                # hook_for_attn = block.register_forward_hook(save_block_output_hook,with_kwargs=True)
+                hook_for_attn = block.attn.register_forward_pre_hook(save_attn_key_forward_pre_hook,with_kwargs=True)
+                hooks.append(hook_for_attn)
 
             generated, _ = model_obj.sample(
                 cond=audio,

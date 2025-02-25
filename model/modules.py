@@ -13,7 +13,7 @@ from copy import deepcopy
 from f5_tts.model.logger import Logger
 import math
 import os
-from typing import Optional
+from typing import Optional, Tuple, Callable
 
 import torch
 import torch.nn.functional as F
@@ -540,7 +540,7 @@ class JointAttnProcessor:
         rope=None,  # rotary position embedding for x
         c_rope=None,  # rotary position embedding for c
         block_id=None
-    ) -> torch.FloatTensor:
+    ) :
         residual = x
 
         batch_size = c.shape[0]
@@ -628,11 +628,87 @@ class JointAttnProcessor:
         return x, c
 
 
+class ToMeBlock(nn.Module):
+    """Token Merging Block that merges similar tokens to reduce computation.
+    
+    Args:
+        r (int): Number of token pairs to merge
+        t (float): Merge Threshold
+        dim (int): Token dimension
+    """
+    def __init__(self, r: int, dim: int):
+        super().__init__()
+        self.r = r
+        self.t = 0.9
+        self.dim = dim
+        
+    def forward(self, x: torch.Tensor, metric: torch.Tensor = None) :
+        """Forward pass
+        Args:
+            x (torch.Tensor): Input tensor of shape [batch, tokens, dim]
+            metric (torch.Tensor, optional): Token similarity metric of shape [batch, tokens, dim]
+            If None, will use the input itself
+        Returns:
+            torch.Tensor: Merged tokens
+        """
+        if self.r <= 0:
+            return x
+            
+        B, N, D = x.shape
+        
+        # Use input as metric if not provided
+        if metric is None:
+            metric = x
+            
+        # Normalize metric
+        metric = metric / metric.norm(dim=-1, keepdim=True)
+        
+        # Split tokens into pairs
+        a = metric[:, ::2, :]  # Even tokens
+        b = metric[:, 1::2, :]  # Odd tokens
+        
+        # Calculate similarity scores
+        scores = a @ b.transpose(-1, -2)
+            
+        # Find most similar pairs
+        _, pairs = scores.topk(k=min(self.r, N//4), dim=-1)
+        
+        # Prepare merge indices
+        merge_idx = torch.arange(N//2, device=x.device)[None, :, None].expand(B, -1, 1)
+        merge_idx = torch.cat([merge_idx, pairs], dim=-1)  # [B, N//2, 2]
+        
+        # Split input tokens
+        x_even = x[:, ::2, :]  # [B, N//2, D]
+        x_odd = x[:, 1::2, :]  # [B, N//2, D]
+        
+        # Merge tokens with weighted averaging
+        merged = []
+        unmerged_idx = []
+        
+        for i in range(N//2):
+            if i < self.r:
+                # Merge this pair
+                tok1 = x_even[:, i:i+1]  # [B, 1, D]
+                tok2_idx = pairs[:, i]  # [B]
+                tok2 = x_odd.gather(1, tok2_idx.unsqueeze(-1).expand(-1, -1, D))  # [B, 1, D]
+                merged.append((tok1 + tok2) / 2)  # Simple average
+            else:
+                # Keep unmerged
+                unmerged_idx.append(i)
+                
+        # Concatenate results
+        merged = torch.cat(merged, dim=1)  # [B, r, D]
+        unmerged = x_even[:, unmerged_idx]  # [B, N//2-r, D]
+        
+        return torch.cat([unmerged, merged], dim=1)
+
+
+
 # DiT Block
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, dim, heads, dim_head, ff_mult=4, dropout=0.1,block_id=None):
+    def __init__(self, dim, heads, dim_head, ff_mult=4, dropout=0.1, block_id=None):
         super().__init__()
 
         self.attn_norm = AdaLayerNormZero(dim)
@@ -645,10 +721,21 @@ class DiTBlock(nn.Module):
             block_id=block_id,
             enable_flash_attn = True,
         )
+        
+        # Add ToMe block
+        self.tome = ToMeBlock(r=10, dim=dim)
+        
         self.block_id = block_id
         self.ff_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff = FeedForward(dim=dim, mult=ff_mult, dropout=dropout, approximate="tanh")
-        self.compress_manager = CompressManager() #！记录压缩情况
+        
+        # ToMe related
+        self.r = 10
+        self._tome_info = {
+            "size": None,
+            "class_token": False,
+            "distill_token": False,
+        }
 
     def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
         
@@ -662,6 +749,7 @@ class DiTBlock(nn.Module):
         # process attention output for input x
         
         x = x + gate_msa.unsqueeze(1) * attn_output
+        x = self.tome(x) # token merge
         norm = self.ff_norm(x) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         
         ff_output = self.ff(norm)

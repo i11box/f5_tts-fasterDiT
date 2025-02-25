@@ -47,16 +47,17 @@ def visualize_block_changes(block_outputs_dir_src, block_outputs_dir_dst, output
     print(f"Using device: {device}")
     
     # 遍历 block_outputs 目录下的所有文件
-    total_steps = 22 * 31
+    total_steps = 22 * 30
     with tqdm(total=total_steps, desc="Processing blocks") as pbar:
         for block_id in range(22):
             print(f"Processing block {block_id}")
             os.makedirs(os.path.join(output_dir, f'block_{block_id}'), exist_ok=True)
-            for step in range(1,31):
+            for step in range(0,29):
                 filename = f"block_{block_id}_step_{step}.pt"
+                dst_filename = f"block_{block_id}_step_{step+1}.pt"
                 # 加载数据
                 src_block_data = torch.load(os.path.join(block_outputs_dir_src, filename), map_location=device)
-                dst_block_data = torch.load(os.path.join(block_outputs_dir_dst, filename), map_location=device)
+                dst_block_data = torch.load(os.path.join(block_outputs_dir_src, dst_filename), map_location=device)
 
                 # 分为有条件和无条件的两部分
                 src_block_data_cond , src_block_data_uncond = src_block_data[0], src_block_data[1]
@@ -86,9 +87,11 @@ def visualize_block_changes(block_outputs_dir_src, block_outputs_dir_dst, output
 
 if __name__ == "__main__":
     # 设置输入输出路径
-    block_outputs_dir_src = "data/block_outputs_none"  # block_outputs 文件夹路径
-    block_outputs_dir_dst = "data/block_outputs_0.2"
-    output_dir = "assets/block_changes_compress_0.2"
+    block_outputs_dir_src = "data/keys_change_10"  # block_outputs 文件夹路径
+    block_outputs_dir_dst = "data/keys_change_70"
+    output_dir_1 = "assets/keys_change_10"
+    output_dir_2 = "assets/keys_change_70"
 
     # 运行可视化
-    visualize_block_changes(block_outputs_dir_src, block_outputs_dir_dst, output_dir)
+    visualize_block_changes(block_outputs_dir_src, block_outputs_dir_dst, output_dir_1)
+    visualize_block_changes(block_outputs_dir_dst,block_outputs_dir_dst, output_dir_2)

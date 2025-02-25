@@ -241,6 +241,7 @@ def efficient_attention_forward(
     rope=None,  # rotary position embedding
     block_id=None,
     enable_flash_attn=True,
+    is_tome = False # tome合并模式
 ): 
     
     method = self.steps_method[self.step]
@@ -324,6 +325,9 @@ def efficient_attention_forward(
     
     self.step += 1
     
+    if is_tome:
+        return x,key.mean(2) # 在注意力头这个维度上求均值
+    
     return x
 
 def save_block_output_hook(module, args, kwargs, output):
@@ -374,3 +378,25 @@ def save_attn_weight_forward_pre_hook(module, args, kwargs):
         attn_weights = attn_weights.masked_fill(~mask, 0.0)
     attn_weights = F.softmax(attn_weights, dim=-1)
     torch.save(attn_weights.detach().cpu(), save_path)
+    
+def save_attn_key_forward_pre_hook(module, args, kwargs):
+    """保存Attention key的前向钩子函数"""
+    # 获取当前时间步
+    step = module.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    
+    # 构建保存路径
+    save_dir = "keys_change"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
+    
+    # 保存权重
+    x = kwargs['x']
+    
+    key = module.to_k(x)
+    
+    torch.save(key.detach().cpu(), save_path)
