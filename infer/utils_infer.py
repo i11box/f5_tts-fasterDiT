@@ -13,18 +13,19 @@ sys.path.append(f"../../{os.path.dirname(os.path.abspath(__file__))}/third_party
 
 import hashlib
 import re
+import optuna,pickle
 import tempfile
 from importlib.resources import files
 
 import matplotlib
 from f5_tts.model.hook import (
     calibration,
-    save_block_output_hook,
     set_need_cahce_residual,
     speedup,
     calculate_flops_hook,
     insert_wars_to_attention_forward,
-    save_attn_weight_forward_pre_hook,
+    transformer_forward_pre_hook_for_eval,
+    eval_method
 )
 matplotlib.use("Agg")
 
@@ -33,6 +34,7 @@ import numpy as np
 import torch
 import torchaudio
 import tqdm
+import json
 from huggingface_hub import snapshot_download, hf_hub_download
 from pydub import AudioSegment, silence
 from transformers import pipeline
@@ -42,6 +44,11 @@ from f5_tts.model import CFM
 from f5_tts.model.utils import (
     get_tokenizer,
     convert_char_to_pinyin,
+)
+
+from f5_tts.infer.method_eval import (
+    reorder_method_candidates,
+    init_method_quality,
 )
 
 _ref_audio_cache = {}
@@ -379,7 +386,8 @@ def infer_process(
     device=device,
     calibration_mode=False,
     delta=None,
-    timer = False
+    timer = False,
+    is_eval = False
 ):
     # Split the input text into batches
     audio, sr = torchaudio.load(ref_audio)
@@ -407,7 +415,8 @@ def infer_process(
         device=device,
         calibration_mode=calibration_mode,
         delta=delta,
-        timer = timer
+        timer = timer,
+        is_eval = is_eval
     )
 
 
@@ -432,7 +441,8 @@ def infer_batch_process(
     device=None,
     calibration_mode=False,  
     delta=None,  
-    timer=False
+    timer=False,
+    is_eval = False
 ):
     audio, sr = ref_audio
     if audio.shape[0] > 1:
@@ -468,16 +478,144 @@ def infer_batch_process(
         # inference
         with torch.inference_mode():
             calibrate_hook = None
+            hooks = []
             if calibration_mode:
                 # 如果是校准模式，调用calibrate方法
-                calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)#w
-            elif calibration_mode is False and delta is not None:
-                speedup(model_obj, steps = nfe_step, window_ratio=0.125, delta=delta)#w
+                calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)
+            elif calibration_mode is False and is_eval is False and delta is not None:
+                speedup(model_obj, steps = nfe_step, window_ratio=0.125, delta=delta)
+            elif is_eval:
+                output_dir = f'data/optuna_result'
+                study_save_path = os.path.join(output_dir, 'study.pkl')
+                if os.path.exists(study_save_path):
+                    print(f"发现之前的优化结果，从断点继续优化: {study_save_path}")
+                    with open(study_save_path, 'rb') as f:
+                        study = pickle.load(f)
+                    print(f"已完成的试验数: {len(study.trials)}")
+                    print(f"当前最佳值: {study.best_value}")
+                else:
+                    # 创建新的study对象
+                    print("创建新的优化研究...")
+                    study = optuna.create_study(direction='minimize')
+
+                print(f"开始优化，共{nfe_step}步,threshold={delta}")
+                
+                n_trials = 10
+                def objective(trial, model_obj):
+                    # 每个时间步的权重作为超参数
+                    step_weights = []
+                    if hooks:
+                        hooks[-1].remove()
+                        hooks.pop()
+                    step_weight_ranges = {
+                        1: (0.0, 0.2),
+                        2: (0.0, 0.2), 
+                        3: (0.0, 0.3),  
+                        4: (0.0, 0.3),
+                        5: (0.0, 1.0),
+                        6: (0.8, 1.0),
+                        7: (0.0, 0.35),
+                        8: (0.0, 0.3),
+                        9: (0.0, 0.3),
+                        10:(0.7, 1.0),
+                        11:(0.6, 1.0)
+                    }
+                    step_fixed_weight = {
+                        12: 0.0,
+                    }
+                    for i in range(1, 13):  # 1-12步，第0步不使用
+                        if i in step_weight_ranges:
+                            min_val, max_val = step_weight_ranges[i]
+                            step_weights.append(trial.suggest_float(f'step_weight_{i}', min_val, max_val))
+                        elif i in step_fixed_weight:
+                            step_weights.append(step_fixed_weight[i])
+                        else:
+                            step_weights.append(trial.suggest_float(f'step_weight_{i}', 0.0, 0.5))
+
+                    eval_hook = eval_method(model_obj, step_weights,steps=nfe_step, threshold=delta)
+                    
+                    hooks.append(eval_hook)
+                    return model_obj.eval_method(
+                        cond=audio,
+                        text=final_text_list,
+                        duration=duration,
+                        steps=nfe_step,
+                        cfg_strength=cfg_strength,
+                        seed = 42,
+                        sway_sampling_coef=sway_sampling_coef,
+                        delta=delta
+                    )
+                
+                study.optimize(
+                    lambda trial: objective(
+                        trial, 
+                        model_obj,
+                    ), 
+                    n_trials=n_trials,  # 运行20次优化
+                    catch=(Exception,),
+                )
+                
+                # 保存优化study以便下次继续
+                with open(study_save_path, 'wb') as f:
+                    pickle.dump(study, f)
+                print(f"优化study已保存至 {study_save_path}")
+                
+                # 获取最佳参数
+                best_params = study.best_params
+                best_value = study.best_value
+                
+                # 保存结果
+                result = {
+                    'best_params': best_params,
+                    'best_value': best_value,
+                    'completed_trials': len(study.trials),
+                }
+                
+                result_path = os.path.join(output_dir, 'best_params.json')
+                with open(result_path, 'w') as f:
+                    json.dump(result, f, indent=2)
+                
+                print(f"优化完成，最佳参数已保存至 {result_path}")
+                print(f"最佳计算量减少: {-best_value}")
+                print(f"完成试验数: {len(study.trials)}")
+                
+                # 可视化结果
+                try:
+                    fig = optuna.visualization.plot_optimization_history(study)
+                    fig.write_html(os.path.join(output_dir, 'optimization_history.html'))
+                    
+                    fig = optuna.visualization.plot_param_importances(study)
+                    fig.write_html(os.path.join(output_dir, 'param_importances.html'))
+                    
+                    fig = optuna.visualization.plot_intermediate_values(study)
+                    fig.write_html(os.path.join(output_dir, 'intermediate_values.html'))
+                    
+                    fig = optuna.visualization.plot_parallel_coordinate(study)
+                    fig.write_html(os.path.join(output_dir, 'parallel_coordinate.html'))
+                    
+                    print(f"可视化结果已保存至 {output_dir}")
+                except Exception as e:
+                    print(f"无法创建可视化结果: {e}")
+                # 保存方法
+                transformer = model_obj.transformer
+                set_need_cahce_residual(transformer)
+
+                # 保存校准后得到的方法
+                to_save_methods = {'methods': [], 'need_residual': []}
+                for blocki, block in enumerate(transformer.transformer_blocks):
+                    to_save_methods['methods'].append(block.attn.steps_method)
+                    to_save_methods['need_residual'].append(block.attn.need_cache_residual)
+
+                with open(f"data\\methods\\{nfe_step}_{delta}_0.125.json", 'w') as file: 
+                    file.write(json.dumps(to_save_methods))
+                
+                # 清理钩子
+                for hook in hooks:
+                    hook.remove()
             else:
-                insert_wars_to_attention_forward(model_obj.transformer,steps = nfe_step, window_ratio=0.125)#w
+                insert_wars_to_attention_forward(model_obj.transformer,steps = nfe_step, window_ratio=0.125)
                 
             # 统计计算的钩子
-            hooks = []
             if calibrate_hook is not None:
                 hooks.append(calibrate_hook)
             # 设置一些参数量
@@ -497,6 +635,7 @@ def infer_batch_process(
                 duration=duration,
                 steps=nfe_step,
                 cfg_strength=cfg_strength,
+                seed = 42,
                 sway_sampling_coef=sway_sampling_coef,
                 delta=delta
             )
@@ -523,7 +662,7 @@ def infer_batch_process(
                     to_save_methods['methods'].append(block.attn.steps_method)
                     to_save_methods['need_residual'].append(block.attn.need_cache_residual)
 
-                with open(f"data\\methods\\{nfe_step}_{delta}_0.125.json", 'w') as file: #w
+                with open(f"data\\methods\\{nfe_step}_{delta}_0.125.json", 'w') as file: 
                     import json
                     file.write(json.dumps(to_save_methods))
 

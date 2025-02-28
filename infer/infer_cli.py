@@ -107,6 +107,13 @@ parser.add_argument(
     help="Compression threshold",
 )
 
+parser.add_argument(
+    "-e",
+    "--eval",
+    action="store_true",
+    help="Enable method eval mode",
+)
+
 args = parser.parse_args()
 
 config = tomli.load(open(args.config, "rb"))
@@ -138,6 +145,7 @@ speed = args.speed
 calibration_mode = args.calibration_mode
 delta = args.delta
 timer = args.timer
+is_eval = args.eval
 
 wave_path = Path(output_dir) / f"infer_cli_out_{delta}.wav"
 # spectrogram_path = Path(output_dir) / "infer_cli_out.png"
@@ -185,7 +193,7 @@ print(f"Using {model}...")
 ema_model = load_model(model_cls, model_cfg, ckpt_file, mel_spec_type=mel_spec_type, vocab_file=vocab_file)
 
 
-def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed, calibration_mode=False, delta=None,timer = False):
+def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove_silence, speed, calibration_mode=False, delta=None,timer = False,is_eval = False):
     main_voice = {"ref_audio": ref_audio, "ref_text": ref_text}
     if "voices" not in config:
         voices = {"main": main_voice}
@@ -222,7 +230,7 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
         ref_text = voices[voice]["ref_text"]
         print(f"Voice: {voice}")
         audio, final_sample_rate, spectragram = infer_process(
-            ref_audio, ref_text, gen_text, model_obj, vocoder, mel_spec_type=mel_spec_type, speed=speed, calibration_mode=calibration_mode, delta=delta,timer=timer
+            ref_audio, ref_text, gen_text, model_obj, vocoder, mel_spec_type=mel_spec_type, speed=speed, calibration_mode=calibration_mode, delta=delta,timer=timer,is_eval=is_eval
         )
         generated_audio_segments.append(audio)
 
@@ -240,7 +248,7 @@ def main_process(ref_audio, ref_text, text_gen, model_obj, mel_spec_type, remove
             print(f.name)
 
 def main():
-    main_process(ref_audio, ref_text, gen_text, ema_model, mel_spec_type, remove_silence, speed, calibration_mode, delta,timer)
+    main_process(ref_audio, ref_text, gen_text, ema_model, mel_spec_type, remove_silence, speed, calibration_mode, delta,timer,is_eval)
 
 
 if __name__ == "__main__":

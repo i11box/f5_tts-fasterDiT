@@ -22,6 +22,60 @@ import math
 if "TOKENIZERS_PARALLELISM" not in os.environ:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+def method2key(method):
+    return method[0] + '&' + method[1]
+
+def get_method_quality(method,step,method_quality=None):
+    if method_quality is None:
+        raise ValueError('should have method quality')
+    else:
+        return method_quality[method2key(method)][str(step)]
+
+def get_method_cost(method):
+    METHOD_COST_UNIT = {
+        'full_attention': 0.5,
+        'ast': 0,
+        'asc': 0,
+        'wars': 0.0625
+    }
+    assert method[1] in METHOD_COST_UNIT and method[0] in METHOD_COST_UNIT
+    return METHOD_COST_UNIT[method[0]] + METHOD_COST_UNIT[method[1]]
+
+def reorder_method_candidates(method_candidates, step_weights, now_stepi, blocki=None,method_quality =None):
+    """
+    根据时间步权重对方法候选列表进行重新排序
+    
+    Args:
+        method_candidates: 原始方法候选列表
+        step_weights: 时间步权重向量
+        now_stepi: 当前时间步
+        blocki: 可选，当前块号
+    
+    Returns:
+        重排序后的方法候选列表
+    """
+    # 为每个方法计算得分
+    # 得分 = 计算量减少 * 时间步权重
+    if now_stepi == 0:  # 第0步使用默认排序
+        return method_candidates
+    
+    if now_stepi >= 12:
+        now_stepi = 12 # 12步后都按12步的排序来
+        
+    method_scores = []
+    for method in method_candidates:
+        # 计算量减少 = 1.0 - METHOD_COST[method_key]
+        computation_reduction = 1.0 - get_method_cost(method)
+        # 乘以当前时间步的权重
+        assert method_quality is not None
+        score = computation_reduction * (1-step_weights[now_stepi-1]) - get_method_quality(method,now_stepi,method_quality) * step_weights[now_stepi-1]
+        method_scores.append((method, score))
+    
+    # 按得分降序排序
+    method_scores.sort(key=lambda x: x[1], reverse=True)
+    
+    # 返回排序后的方法列表
+    return [method for method, _ in method_scores]
 
 """
 计算Attention的Flops
@@ -194,6 +248,91 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         block.attn.need_cache_output[now_stepi] = [True,True]
         block.attn.need_cache_residual[now_stepi] = [True,True]
 
+# 修改后的校准函数，使用优化后的搜索顺序
+def transformer_forward_pre_hook_for_eval(model, args, kwargs, step_weights):
+    method_quality = json.load(open('data/method_quality.json', 'r', encoding='utf-8'))
+    now_stepi = model.transformer_blocks[0].attn.step
+
+    if not hasattr(model, 'calibration_progress'):
+        model.calibration_progress = tqdm(total=32, desc="校准进度", position=0)
+        model.calibration_progress.update(now_stepi)
+    else:
+        model.calibration_progress.update(1)
+
+    # 为了避免在搜索candidate method时对cache内容产生改变，因此搜索时需要先关掉cache的开关
+    for block in model.transformer_blocks:
+        block.attn.forward = types.MethodType(efficient_attention_forward, block.attn)
+        block.attn.need_cache_output[now_stepi] = [False, False]
+        block.attn.need_cache_residual[now_stepi] = [False, False]
+
+    # 原始方法候选列表
+    default_method_candidates = [
+        ['ast', 'ast'],
+        ['ast', 'asc'],
+        ['asc', 'ast'],
+        ['ast', 'wars'],
+        ['wars', 'ast'],
+        ['wars', 'asc'],
+        ['asc', 'wars'],
+        ['wars', 'wars'],
+        ['full_attention', 'ast'],
+        ['ast', 'full_attention'],
+        ['full_attention', 'asc'],
+        ['asc', 'full_attention'],
+        ['wars', 'full_attention'],
+        ['full_attention', 'wars'],
+    ]
+    
+    # 先走一遍得到full-attention的值
+    raw_outputs = model.forward(*args, **kwargs)
+    raw_output_cond, raw_output_uncond = raw_outputs.chunk(2, dim=0)
+    raw_outputs = 2 * raw_output_cond - raw_output_uncond
+    
+    for blocki, block in enumerate(model.transformer_blocks):
+        if now_stepi == 0:
+            continue
+            
+        # 使用加权排序的方法列表
+        method_candidates = reorder_method_candidates(
+            deepcopy(default_method_candidates), 
+            step_weights, 
+            now_stepi, 
+            blocki,
+            method_quality
+        )
+        
+        # method的由强到弱
+        selected_method = ['full_attention', 'full_attention']  # 第一个代表cond
+        for method in method_candidates:
+            block.attn.steps_method[now_stepi] = method
+
+            for block_ in model.transformer_blocks:
+                block_.attn.step = now_stepi
+            efficient_outputs = model.forward(*args, **kwargs)
+            efficient_output_cond, efficient_output_uncond = efficient_outputs.chunk(2, dim=0)
+            efficient_outputs = 2 * efficient_output_cond - efficient_output_uncond
+            loss = compression_loss(raw_outputs, efficient_outputs)
+            threshold = model.loss_thresholds[now_stepi][blocki]
+
+            if loss < threshold:
+                selected_method = method
+                break
+                    
+        block.attn.steps_method[now_stepi] = selected_method
+        del loss, efficient_outputs
+    
+    del raw_outputs
+
+    # 因为这只是一个transformer的一个prehook，
+    # 在最终确定好所有的机制以后还会走一次transformer的forward，在那一个forward里面step会递增，因此这里需要将递增的step恢复
+    for block_ in model.transformer_blocks:
+        block_.attn.step = now_stepi
+    
+    # 在确定本次Step的计划确定之后，将Cache的开关打开，使得本次Step的Cache能够正常产生
+    for block in model.transformer_blocks:
+        block.attn.need_cache_output[now_stepi] = [True, True]
+        block.attn.need_cache_residual[now_stepi] = [True, True]
+
 def set_need_cahce_residual(transformer):
     for blocki, block in enumerate(transformer.transformer_blocks):
         for stepi in range(len(block.attn.need_cache_residual)-1):
@@ -202,7 +341,7 @@ def set_need_cahce_residual(transformer):
                     block.attn.need_cache_residual[stepi][i] = False
                 block.attn.need_cache_residual[-1][i] = False
 
-def calibration(model, steps=32, threshold=0.1, window_ratio=0.125):#w
+def calibration(model, steps=32, threshold=0.1, window_ratio=0.125,is_eval = False):
 
     print("Calibration for transformer!!!")
     transformer = model.transformer # model应该是cfm
@@ -216,12 +355,34 @@ def calibration(model, steps=32, threshold=0.1, window_ratio=0.125):#w
         loss_thresholds.append(sub_list)
 
     insert_wars_to_attention_forward(transformer)
-
+    
     hook = transformer.register_forward_pre_hook(transformer_forward_pre_hook_for_calibration, with_kwargs=True)
     transformer.loss_thresholds = loss_thresholds
     return hook # 返回hook引用便于移除
 
-def speedup(model,delta = None, steps=32, window_ratio=0.125):#w
+def eval_method(model, step_weights, steps=32, threshold=0.2,):
+    
+    print("Eval Method for transformer!!!")
+    transformer = model.transformer # model应该是cfm
+
+    loss_thresholds = []
+    for step_i in range(steps):
+        sub_list = []
+        for blocki in range(len(transformer.transformer_blocks)):
+            threshold_i = (blocki + 1) / len(transformer.transformer_blocks) * threshold
+            sub_list.append(threshold_i)
+        loss_thresholds.append(sub_list)
+
+    insert_wars_to_attention_forward(transformer)
+    
+    fn_eval = lambda *args, **kwargs: transformer_forward_pre_hook_for_eval(*args, **kwargs, step_weights=step_weights)
+    
+    hook = transformer.register_forward_pre_hook(fn_eval, with_kwargs=True)
+
+    transformer.loss_thresholds = loss_thresholds
+    return hook # 返回hook引用便于移除
+
+def speedup(model,delta = None, steps=32, window_ratio=0.125):
     assert delta is not None
     # print("Speedup for transformer!!!")
     transformer = model.transformer # model应该是cfm
@@ -229,7 +390,7 @@ def speedup(model,delta = None, steps=32, window_ratio=0.125):#w
     path = f"data\\methods\\{steps}_{delta}_{window_ratio}.json"
     insert_wars_to_attention_forward(transformer, steps=steps, window_ratio=window_ratio, method_path = path)
 
-def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, method_path = None):#w
+def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, method_path = None):
     if method_path is None:
         methods = [['full_attention', 'full_attention']] * len(transformer.transformer_blocks)
         output_shares = [[False, False]] * len(transformer.transformer_blocks)

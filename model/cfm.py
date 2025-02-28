@@ -217,7 +217,6 @@ class CFM(nn.Module):
 			t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
 		self.transformer.set_all_block_id()
-
 		trajectory = odeint(
 				lambda t, x: fn(t, x, step_cond, text),
 				y0,
@@ -236,6 +235,169 @@ class CFM(nn.Module):
 			out = vocoder(out)
 
 		return out, trajectory
+
+
+	@torch.no_grad()
+	def eval_method(
+		self,
+		cond: float["b n d"] | float["b nw"],  # noqa: F722
+		text: int["b nt"] | list[str],  # noqa: F722
+		duration: int | int["b"],  # noqa: F821
+		*,
+		lens: int["b"] | None = None,  # noqa: F821
+		steps=32,
+		cfg_strength=1.0,
+		sway_sampling_coef=None,
+		seed: int | None = None,
+		max_duration=4096,
+		vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,  # noqa: F722
+		no_ref_audio=False,
+		duplicate_test=False,
+		t_inter=0.1,
+		edit_mask=None,
+		delta = None,
+		timer = False,
+	):
+		self.eval()
+  
+		# raw wave
+		if cond.ndim == 2: 
+			cond = self.mel_spec(cond)
+			cond = cond.permute(0, 2, 1)
+			assert cond.shape[-1] == self.num_channels
+
+		cond = cond.to(next(self.parameters()).dtype)
+
+		batch, cond_seq_len, device = *cond.shape[:2], cond.device
+		if not exists(lens):
+			lens = torch.full((batch,), cond_seq_len, device=device, dtype=torch.long)
+
+		# text
+
+		if isinstance(text, list):
+			if exists(self.vocab_char_map):
+				text = list_str_to_idx(text, self.vocab_char_map).to(device)
+			else:
+				text = list_str_to_tensor(text).to(device)
+			assert text.shape[0] == batch
+
+		if exists(text):
+			text_lens = (text != -1).sum(dim=-1)
+			lens = torch.maximum(text_lens, lens)  # make sure lengths are at least those of the text characters
+
+		# duration
+
+		cond_mask = lens_to_mask(lens)
+		if edit_mask is not None:
+			cond_mask = cond_mask & edit_mask
+
+		if isinstance(duration, int):
+			duration = torch.full((batch,), duration, device=device, dtype=torch.long)
+
+		duration = torch.maximum(lens + 1, duration)  # just add one token so something is generated
+		duration = duration.clamp(max=max_duration)
+		max_duration = duration.amax()
+
+		# duplicate test corner for inner time step oberservation
+		if duplicate_test:
+			test_cond = F.pad(cond, (0, 0, cond_seq_len, max_duration - 2 * cond_seq_len), value=0.0)
+
+		cond = F.pad(cond, (0, 0, 0, max_duration - cond_seq_len), value=0.0)
+		cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
+		cond_mask = cond_mask.unsqueeze(-1)
+		step_cond = torch.where(
+			cond_mask, cond, torch.zeros_like(cond)
+		)  # allow direct control (cut cond audio) with lens passed in
+
+		if batch > 1:
+			mask = lens_to_mask(duration)
+		else:  # save memory and speed up, as single inference need no mask currently
+			mask = None
+
+		# test for no ref audio
+		if no_ref_audio:
+			cond = torch.zeros_like(cond)
+
+		# neural ode
+
+		def fn(t, x, step_cond, text):
+			# at each step, conditioning is fixed
+			# step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
+
+			# predict flow
+			x, step_cond, text = x.repeat(2, 1, 1), step_cond.repeat(2, 1, 1), text.repeat(2, 1)
+			pred = self.transformer(
+				x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=True, drop_text=True
+			)
+			pred, null_pred = pred.chunk(2)
+			if cfg_strength < 1e-5:
+				return pred
+
+			return pred + (pred - null_pred) * cfg_strength
+
+		# noise input
+		# to make sure batch inference result is same with different batch size, and for sure single inference
+		# still some difference maybe due to convolutional layers
+		y0 = []
+		for dur in duration:
+			if exists(seed):
+				torch.manual_seed(seed)
+			y0.append(torch.randn(dur, self.num_channels, device=self.device, dtype=step_cond.dtype))
+		y0 = pad_sequence(y0, padding_value=0, batch_first=True)
+
+		t_start = 0
+
+		# duplicate test corner for inner time step oberservation
+		if duplicate_test:
+			t_start = t_inter
+			y0 = (1 - t_start) * y0 + t_start * test_cond
+			steps = int(steps * (1 - t_start))
+
+		t = torch.linspace(t_start, 1, steps, device=self.device, dtype=step_cond.dtype)
+		if sway_sampling_coef is not None:
+			t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
+
+		self.transformer.set_all_block_id()
+		odeint(
+				lambda t, x: fn(t, x, step_cond, text),
+				y0,
+				t,
+				atol=1e-4,
+				rtol=1e-4,
+				method="euler",
+		)
+  
+		def calculate_total_cost(transformer):
+			METHOD_COST_UNIT = {
+				'full_attention': 0.5,
+				'ast': 0,
+				'asc': 0,
+				'wars': 0.0625
+			}
+			total_cost = 0
+			method_static = {
+				'full_attention': 0,
+				'ast': 0,
+				'asc': 0,
+				'wars': 0
+			}
+			# 统计每个块和步骤的策略计算量
+			for blocki, block in enumerate(transformer.transformer_blocks):
+				for stepi in range(len(block.attn.steps_method)):
+					method = block.attn.steps_method[stepi]
+					for i in range(2):
+						if method[i] in METHOD_COST_UNIT:
+							total_cost += METHOD_COST_UNIT[method[i]] * (1.125 if block.attn.need_cache_residual[stepi][i] and method[i] == 'full_attention' else 1.0)
+							method_static[method[i]] += 1
+						else:
+							raise ValueError(f"Unknown method: {method}")
+			
+			print(method_static)
+			
+			return total_cost
+
+		return calculate_total_cost(self.transformer)
+
 
 	# 校准
 	@torch.no_grad()
@@ -394,24 +556,6 @@ class CFM(nn.Module):
 			
 		print("策略保存成功")
 
-	def _compression_compare(self,a, b):
-		ls = []
-		for ai, bi in zip(a, b):
-			if isinstance(ai, torch.Tensor):
-				diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
-				l = diff.abs().clip(0, 10).mean()
-				ls.append(l)
-		result = sum(ls) / len(ls)
-		return result
-	
-	def _compression_isok(self,a, b, delta,block_id):
-		return self._compression_compare(a, b) < delta * (block_id+1) / len(self.transformer.transformer_blocks)
-
-	# 清空所有缓存
-	def _reset_compress_manager(self):
-		for block in self.transformer.transformer_blocks:
-			block.compress_manager.reset()
-
 	def forward(
 		self,
 		inp: float["b n d"] | float["b nw"],  # mel or raw wave  # noqa: F722
@@ -486,16 +630,3 @@ class CFM(nn.Module):
 		loss = loss[rand_span_mask]
 
 		return loss.mean(), cond, pred
-
-	#! 汇报FLOPS
-	def report(self):
-		print("CFM.report() called")
-		print(f"transformer type: {type(self.transformer)}")
-		if isinstance(self.transformer, DiT): 
-			print("Transformer is DiT, calling report_stats()")
-			flops = self.transformer.report_stats()
-			print(f"Got flops: {flops}")
-			return flops
-		else:
-			print(f"Transformer is not DiT: {type(self.transformer)}")
-			return None
