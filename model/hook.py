@@ -64,13 +64,18 @@ def calculate_flops_hook(module, args, kwargs):
 计算raw output与efficient output之间的差距，使用默认值计算Loss
 """
 def compression_loss(a, b, metric=""):
-    ls = []
-    for ai, bi in zip(a, b):
-        if isinstance(ai, torch.Tensor):
-            diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
-            l = diff.abs().clip(0, 10).mean()
-            ls.append(l)
-    l = sum(ls) / len(ls)
+    if metric == 'fro':
+        diff = abs(a - b)
+        frobenius_norm = torch.norm(diff, p='fro')  # Frobenius 范数
+        return frobenius_norm.item()  # 返回标量值
+    else:
+        ls = []
+        for ai, bi in zip(a, b):
+            if isinstance(ai, torch.Tensor):
+                diff = (ai - bi) / (torch.max(ai, bi) + 1e-6)
+                l = diff.abs().clip(0, 10).mean()
+                ls.append(l)
+        l = sum(ls) / len(ls)
     return l
 
 """
@@ -127,7 +132,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
             efficient_outputs = model.forward(*args, **kwargs)
             efficient_output_cond,efficient_output_uncond = efficient_outputs.chunk(2,dim=0)
             efficient_outputs = 2*efficient_output_cond - efficient_output_uncond
-            loss = compression_loss(raw_outputs, efficient_outputs)
+            loss = compression_loss(raw_outputs, efficient_outputs,'fro')
             threshold = model.loss_thresholds[now_stepi][blocki]
             # print(f"Try### Block:{blocki} Step:{now_stepi} Method:{method} Loss:{loss} Threshold:{threshold}")
 
