@@ -113,6 +113,41 @@ def calculate_flops_hook(module, args, kwargs):
     # 记录实际计算量
     module.efficient_ops += op[0] + op[1]
 
+
+def calculate_ff_flops_hook(module, args, kwargs):
+    # 从kwargs中获取hidden_states
+    hidden_states = args[0]
+    batch_size, seq_len, dim = hidden_states.shape
+    project_in = module.ff[0]
+    first_linear = project_in[0]  # Sequential中的第一个Linear
+    inner_dim = first_linear.out_features
+    
+    # 基础计算量：
+    # 第一个Linear: dim -> inner_dim
+    # 第二个Linear: inner_dim -> dim
+    base_ops = (
+        batch_size * seq_len * dim * inner_dim +  # 第一个Linear
+        batch_size * seq_len * inner_dim * dim    # 第二个Linear
+    )
+    
+    # 记录全精度计算量
+    module.full_ops += base_ops
+    
+    # 获取当前方法
+    method = module.steps_method[module.step]
+
+    cond_op = deepcopy(base_ops)
+    uncond_op = deepcopy(base_ops)
+    op = [cond_op /2, uncond_op /2]
+    
+    # 根据不同方法计算实际计算量
+    for i in range(2):
+        if method[i] == "ast" or method[i] == 'asc':
+            op[i] = 0
+    
+    # 记录实际计算量
+    module.efficient_ops += op[0] + op[1]
+
 """
 计算raw output与efficient output之间的差距，使用默认值计算Loss
 """
@@ -139,6 +174,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         block.attn.forward = types.MethodType(efficient_attention_forward, block.attn)
         block.attn.need_cache_output[now_stepi] = [False,False]
         block.attn.need_cache_residual[now_stepi] = [False,False]
+        block.ff.need_cache_output[now_stepi] = [False, False]
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
@@ -208,9 +244,12 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
             step_pbar.set_postfix_str(f"block {blocki + 1}/{total_blocks} method: {method}")
             # print(f"Try###Block:{blocki} Step:{now_stepi} Method:{method}")
             block.attn.steps_method[now_stepi] = method
+            # 修改ff的方法
+            block.ff.steps_method[now_stepi] = method
 
             for block_ in model.transformer_blocks:
                 block_.attn.step = now_stepi
+                block_.ff.step = now_stepi
             efficient_outputs = model.forward(*args, **kwargs)
             efficient_output_cond,efficient_output_uncond = efficient_outputs.chunk(2,dim=0)
             efficient_outputs = 2*efficient_output_cond - efficient_output_uncond
@@ -231,6 +270,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         step_pbar.close()
         
         block.attn.steps_method[now_stepi] = selected_method
+        block.ff.steps_method[now_stepi] = selected_method
         del loss, efficient_outputs
         
         if now_stepi == 31:
@@ -242,11 +282,13 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     # 在最终确定好所有的机制以后还会走一次transformer的forward，在那一个forward里面step会递增，因此这里需要将递增的step恢复
     for block_ in model.transformer_blocks:
         block_.attn.step = now_stepi
-    
+        block_.ff.step = now_stepi
+
     # 在确定本次Step的计划确定之后，将Cache的开关打开，使得本次Step的Cache能够正常产生
     for block in model.transformer_blocks:
         block.attn.need_cache_output[now_stepi] = [True,True]
         block.attn.need_cache_residual[now_stepi] = [True,True]
+        block.ff.need_cache_output[now_stepi] = [True, True]
 
 # 修改后的校准函数，使用优化后的搜索顺序
 def transformer_forward_pre_hook_for_eval(model, args, kwargs, step_weights):
@@ -397,7 +439,8 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
         assert len(methods) == len(transformer.transformer_blocks)
         for block, method, output_share in zip(transformer.transformer_blocks, methods, output_shares):
             attn = block.attn
-            # set some attribute
+            ff = block.ff
+            # for attn set some attribute
             attn.window_ratio = window_ratio
             attn.method = method
             attn.output_share = output_share
@@ -408,12 +451,21 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             attn.need_cache_output = [[True, True] for _ in range(steps)]
             attn.cached_residual = None
             attn.cached_output = None
+            # for ff set some attribute
+            ff.method = method
+            ff.steps_method = [['full_attention', 'full_attention']for _ in range(steps)]
+            ff.need_cache_output = [[True, True] for _ in range(steps)]
+            ff.output_share = output_share
+            ff.step = 0
+            ff.forward = types.MethodType(efficient_ff_forward, ff)
+            ff.cached_output = None
     else:
         with open(method_path, 'r') as f:
             import json
             saved_methods = json.loads(open(method_path).read())['methods']
 
             for methods, block in zip(saved_methods, transformer.transformer_blocks):
+                # for attn
                 attn = block.attn
                 attn.steps_method = methods
                 attn.window_ratio = window_ratio
@@ -423,8 +475,76 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
                 attn.need_cache_output = [[True, True] for _ in range(steps)]
                 attn.cached_residual = None
                 attn.cached_output = None
-                
+                # for ff
+                ff = block.ff
+                ff.steps_method = methods
+                ff.need_cache_output = [[True, True] for _ in range(steps)]
+                ff.output_share = False
+                ff.step = 0
+                ff.forward = types.MethodType(efficient_ff_forward, ff)
+                ff.cached_output = None
+
             set_need_cahce_residual(transformer)
+
+def efficient_ff_forward(self, x):
+    batch_size = x.shape[0] // 2  # 总batch size的一半，用于分割条件和无条件部分
+    outputs = []
+    
+    # 分别处理条件和无条件部分
+    x_cond = x[:batch_size]  # 条件部分
+    x_uncond = x[batch_size:]  # 无条件部分
+    
+    asc_index = -1
+    
+    for i, (curr_x, curr_method) in enumerate(zip([x_cond, x_uncond], self.steps_method[self.step])):
+        # 如果是asc，直接跳过，后面复制输出
+        if 'asc' in curr_method:
+            asc_index = i
+            continue
+        # 如果是AST模式,直接使用缓存的输出
+        if 'ast' in curr_method:
+            if i == 0:  # 条件部分
+                outputs.append(self.cached_output[:batch_size])
+            else:  # 无条件部分
+                outputs.append(self.cached_output[batch_size:])
+            continue
+            
+        # 计算前馈网络输出
+        curr_output = self.ff(curr_x)
+        
+        # 缓存输出如果需要
+        if self.need_cache_output[self.step][i]:
+            # 如果是第一次使用，初始化cached_output
+            if self.cached_output is None:
+                device = curr_output.device
+                dtype = curr_output.dtype
+                self.cached_output = torch.zeros([2, curr_output.shape[1], curr_output.shape[2]], device=device, dtype=dtype)
+                
+            if i == 0:  # 条件部分
+                self.cached_output[:batch_size] = curr_output
+            else:  # 无条件部分
+                self.cached_output[batch_size:] = curr_output
+                
+        outputs.append(curr_output)
+        
+    if asc_index >= 0:
+        output_copy = outputs[0].clone()
+        outputs.insert(asc_index, output_copy)
+        # 更新缓存
+        if asc_index == 0:
+            if self.need_cache_output[self.step][0]:
+                self.cached_output[:batch_size] = output_copy
+        else:
+            if self.need_cache_output[self.step][1]:
+                self.cached_output[batch_size:] = output_copy
+    
+    # 合并条件和无条件输出
+    x = torch.cat(outputs, dim=0)
+    
+    # 更新step
+    self.step += 1
+    
+    return x
 
 def efficient_attention_forward(
     self,
