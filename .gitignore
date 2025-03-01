@@ -16,3 +16,5 @@ data
 .windsurfrules
 .vscode
 *.pt
+output
+block_outputs

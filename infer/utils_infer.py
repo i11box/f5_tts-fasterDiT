@@ -19,11 +19,13 @@ from importlib.resources import files
 import matplotlib
 from f5_tts.model.hook import (
     calibration,
+    save_block_output_hook,
     set_need_cahce_residual,
     speedup,
     calculate_flops_hook,
     calculate_ff_flops_hook,
     insert_wars_to_attention_forward,
+    save_attn_weight_forward_pre_hook,
 )
 matplotlib.use("Agg")
 
@@ -489,6 +491,10 @@ def infer_batch_process(
                 hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
                 hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
                 hooks.append(hook)
+                #hook_for_attn = block.register_forward_hook(save_block_output_hook,with_kwargs=True)
+                # hook_for_attn = block.attn.register_forward_pre_hook(save_attn_weight_forward_pre_hook,with_kwargs=True)
+                # hooks.append(hook_for_attn)
+
                 hooks.append(hook_ff)
 
             generated, _ = model_obj.sample(

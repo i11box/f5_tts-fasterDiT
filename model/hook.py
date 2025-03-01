@@ -42,23 +42,23 @@ def calculate_flops_hook(module, args, kwargs):
     method = module.steps_method[module.step]
     window_size = module.window_size * 2 if hasattr(module, 'window_size') else int(seq_len * module.window_ratio) * 2
     
+    cond_op = deepcopy(base_ops)
+    uncond_op = deepcopy(base_ops)
+    op = [cond_op /2, uncond_op /2]
+    
     # 根据不同方法计算实际计算量
-    if method == "full_attention":
-        if module.need_cache_residual[module.step]:
-            base_ops *= 1 + window_size / seq_len
-    elif method == "ASC":
-        base_ops = base_ops / 2
-        if module.need_cache_residual[module.step]:
-            base_ops *= 1 + window_size / seq_len
-    elif method == 'wars':
-        base_ops *= window_size / seq_len
-    elif method == 'wars+ASC':
-        base_ops = base_ops * window_size / seq_len / 2
-    elif method == "AST":
-        base_ops = 0
+    for i in range(2):
+        if method[i] == "full_attention":
+            if module.need_cache_residual[module.step][i]:
+                op[i] *= 1 + window_size / seq_len
+        elif method[i] == 'wars':
+            op[i] *= window_size / seq_len
+        elif method[i] == "ast" or method[i] == 'asc':
+            op[i] = 0
     
     # 记录实际计算量
-    module.efficient_ops += base_ops
+    module.efficient_ops += op[0] + op[1]
+
 
 def calculate_ff_flops_hook(module, args, kwargs):
     # 从kwargs中获取hidden_states
@@ -83,10 +83,19 @@ def calculate_ff_flops_hook(module, args, kwargs):
     method = module.steps_method[module.step]
     
     # 根据不同方法计算实际计算量
-    if method == "AST":
-        base_ops = 0
+    if method == "full_attention":
+        if module.need_cache_residual[module.step]:
+            base_ops *= 1 + window_size / seq_len
     elif method == "ASC":
-        base_ops *= 0.5
+        base_ops = base_ops / 2
+        if module.need_cache_residual[module.step]:
+            base_ops *= 1 + window_size / seq_len
+    elif method == 'wars':
+        base_ops *= window_size / seq_len
+    elif method == 'wars+ASC':
+        base_ops = base_ops * window_size / seq_len / 2
+    elif method == "AST":
+        base_ops = 0
     
     # 记录实际计算量
     module.efficient_ops += base_ops
@@ -115,12 +124,46 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     # 为了避免在搜索candidate method时对cache内容产生改变，因此搜索时需要先关掉cache的开关
     for block in model.transformer_blocks:
         block.attn.forward = types.MethodType(efficient_attention_forward, block.attn)
-        block.attn.need_cache_output[now_stepi] = False
-        block.attn.need_cache_residual[now_stepi] = False
+        block.attn.need_cache_output[now_stepi] = [False,False]
+        block.attn.need_cache_residual[now_stepi] = [False,False]
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
-    method_candidates = ['AST', 'wars+ASC', 'wars', 'ASC']
+    method_candidates = [
+        ['ast', 'ast'],
+        ['ast', 'asc'],
+        ['asc', 'ast'],
+        ['ast', 'wars'],
+        ['wars', 'ast'],
+        ['wars','asc'],
+        ['asc','wars'],
+        ['wars', 'wars'],
+        ['full_attention', 'ast'],
+        ['ast','full_attention'],
+        ['full_attention', 'asc'],
+        ['asc', 'full_attention'],
+        ['wars', 'full_attention'],
+        ['full_attention', 'wars'],
+    ]
+    # method_candidates = [
+    #     ['ast', 'ast'],
+    #     ['wars','asc'],
+    #     ['wars', 'wars'],
+    #     ['full_attention', 'asc'],
+    # ]
+    # method_candidates = [
+    #     ['ast', 'ast'],
+    #     ['full_attention','ast'],
+    #     ['ast','full_attention'],
+    #     ['wars', 'wars'],
+    #     ['full_attention','wars'],
+    #     ['wars','full_attention'],
+    # ]
+    # method_candidates = [
+    #     ['ast', 'ast'],
+    #     ['wars', 'wars'],
+    # ]
+    
     if not hasattr(model, 'total_pbar'):
         total_steps = 32 * total_blocks * len(method_candidates)
         model.total_pbar = tqdm(
@@ -147,7 +190,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         if now_stepi == 0:
             continue
         # method的由强到弱
-        selected_method = 'full_attention'
+        selected_method = ['full_attention','full_attention'] # 第一个代表cond
         for method in method_candidates:
             step_pbar.set_postfix_str(f"block {blocki + 1}/{total_blocks} method: {method}")
             # print(f"Try###Block:{blocki} Step:{now_stepi} Method:{method}")
@@ -194,18 +237,17 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
 
     # 在确定本次Step的计划确定之后，将Cache的开关打开，使得本次Step的Cache能够正常产生
     for block in model.transformer_blocks:
-        block.attn.need_cache_output[now_stepi] = True
-        block.attn.need_cache_residual[now_stepi] = True
-        block.ff.need_cache_output[now_stepi] = True
+        block.attn.need_cache_output[now_stepi] = [True,True]
+        block.attn.need_cache_residual[now_stepi] = [True,True]
+        block.ff.need_cache_output[now_stepi] = [True, True]
 
 def set_need_cahce_residual(transformer):
     for blocki, block in enumerate(transformer.transformer_blocks):
         for stepi in range(len(block.attn.need_cache_residual)-1):
-            if block.attn.steps_method[stepi+1] == 'full_attention':
-                block.attn.need_cache_residual[stepi] = False
-            elif block.attn.steps_method[stepi+1] == 'ASC':
-                block.attn.need_cache_residual[stepi] = False
-        block.attn.need_cache_residual[-1] = False
+            for i in range(2):
+                if block.attn.steps_method[stepi+1][i] in ['full_attention','asc']:
+                    block.attn.need_cache_residual[stepi][i] = False
+                block.attn.need_cache_residual[-1][i] = False
 
 def calibration(model, steps=32, threshold=0.1, window_ratio=0.125):#w
 
@@ -236,8 +278,8 @@ def speedup(model,delta = None, steps=32, window_ratio=0.125):#w
 
 def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, method_path = None):#w
     if method_path is None:
-        methods = ["full_attention"] * len(transformer.transformer_blocks)
-        output_shares = [False] * len(transformer.transformer_blocks)
+        methods = [['full_attention', 'full_attention']] * len(transformer.transformer_blocks)
+        output_shares = [[False, False]] * len(transformer.transformer_blocks)
         assert len(methods) == len(transformer.transformer_blocks)
         for block, method, output_share in zip(transformer.transformer_blocks, methods, output_shares):
             attn = block.attn
@@ -248,9 +290,9 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             attn.output_share = output_share
             attn.step = 0
             attn.forward = types.MethodType(efficient_attention_forward, attn)
-            attn.steps_method = ['full_attention'] * steps
-            attn.need_cache_residual = [True] * steps
-            attn.need_cache_output = [True] * steps
+            attn.steps_method = [['full_attention', 'full_attention']for _ in range(steps)]
+            attn.need_cache_residual = [[True, True] for _ in range(steps)]
+            attn.need_cache_output = [[True, True] for _ in range(steps)]
             attn.cached_residual = None
             attn.cached_output = None
             # for ff set some attribute
@@ -273,8 +315,8 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
                 attn.window_ratio = window_ratio
                 attn.step = 0
                 attn.forward = types.MethodType(efficient_attention_forward, attn)
-                attn.need_cache_residual = [True] * steps
-                attn.need_cache_output = [True] * steps
+                attn.need_cache_residual = [[True, True] for _ in range(steps)]
+                attn.need_cache_output = [[True, True] for _ in range(steps)]
                 attn.cached_residual = None
                 attn.cached_output = None
                 # for ff
@@ -318,86 +360,174 @@ def efficient_attention_forward(
     block_id=None,
     enable_flash_attn=True,
 ): 
+    batch_size = x.shape[0] // 2  # 总batch size的一半，用于分割条件和无条件部分
+    outputs = []
     
-    method = self.steps_method[self.step]
-
-    # 是否直接share最近一个Step的output, AST机制
-    if 'AST' in method:
-        self.step += 1
-        return self.cached_output
-
-    # ASC机制计算
-    # 如果使用了ASC机制，那我们先只算conditional的情况    
-    if 'ASC' in method:
-        # 将unconditional排除
-        x,_ = x.chunk(2,dim=0)
-
-    # `sample` projections.
-    query = self.to_q(x)
-    key = self.to_k(x)
-    value = self.to_v(x)
-
-    batch_size, seq_len, _ = x.shape
-
-    # apply rotary position embedding
-    if rope is not None:
-        freqs, xpos_scale = rope
-        q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
-
-        query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
-        key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
-
-    # attention
-    inner_dim = key.shape[-1]
-    head_dim = inner_dim // self.heads
-    query = query.view(batch_size, -1, self.heads, head_dim)
-    key = key.view(batch_size, -1, self.heads, head_dim)
-    value = value.view(batch_size, -1, self.heads, head_dim)
-
-    # step 1，计算window_size
-    self.window_size = int(seq_len * self.window_ratio)
-    w_output = flash_attn_func(query, key, value, causal=False, window_size=(-self.window_size, self.window_size))
-
-    # step2，确定使用full attention还是使用wars
-    if 'full_attention' in method:
-        # 默认使用了full_attention就一定会计算residual
-        f_output = flash_attn_func(query, key, value, causal=False)
-        w_residual = f_output-w_output
-        if self.need_cache_residual[self.step]:
-            self.cached_residual = w_residual
-        output = f_output
-    elif 'wars' in method:
-        assert hasattr(self, 'cached_residual'), "必须要先过Full attention产生Residual output才能使用Wars"
-        output = w_output + self.cached_residual[:batch_size]
-    elif 'ASC' in method:
-        f_output = flash_attn_func(query, key, value, causal=False)
-        w_residual = f_output-w_output
-        if self.need_cache_residual[self.step]:
-            self.cached_residual =  torch.cat([w_residual, w_residual], dim=0)
-        output = f_output
-    else:
-        raise NotImplementedError
-
-    x = output.reshape(batch_size, -1, self.heads * head_dim)
-    x = x.to(query.dtype)
+    # 分别处理条件和无条件部分
+    x_cond = x[:batch_size]  # 条件部分
+    x_uncond = x[batch_size:]  # 无条件部分
+    
+    asc_index = -1
+    
+    for i, (curr_x, curr_method) in enumerate(zip([x_cond, x_uncond], self.steps_method[self.step])):
+        # 如果是asc，直接跳过，后面复制输出
+        if 'asc' in curr_method:
+            asc_index = i
+            continue
+        # 如果是AST模式,直接使用缓存的输出
+        if 'ast' in curr_method:
+            if i == 0:  # 条件部分
+                outputs.append(self.cached_output[:batch_size])
+            else:  # 无条件部分
+                outputs.append(self.cached_output[batch_size:])
+            continue
+            
+        # 计算query, key, value投影
+        query = self.to_q(curr_x)
+        key = self.to_k(curr_x)
+        value = self.to_v(curr_x)
         
-    # linear proj
-    x = self.to_out[0](x)
-    
-    # dropout
-    x = self.to_out[1](x)
+        curr_batch_size, seq_len, _ = curr_x.shape
+        
+        # 应用旋转位置编码
+        if rope is not None:
+            freqs, xpos_scale = rope
+            q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale**-1.0) if xpos_scale is not None else (1.0, 1.0)
+            query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
+            key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
+            
+        # 重塑attention维度
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // self.heads
+        query = query.view(curr_batch_size, -1, self.heads, head_dim)
+        key = key.view(curr_batch_size, -1, self.heads, head_dim)
+        value = value.view(curr_batch_size, -1, self.heads, head_dim)
+        
+        # 计算window attention输出
+        self.window_size = int(seq_len * self.window_ratio)
+        w_output = flash_attn_func(query, key, value, causal=False, window_size=(-self.window_size, self.window_size))
+        
+        # 根据方法选择attention策略
+        if 'full_attention' in curr_method:
+            # 计算full attention和residual
+            f_output = flash_attn_func(query, key, value, causal=False)
+            w_residual = f_output - w_output
+            
+            device = w_output.device
+            dtype = w_output.dtype
+            
+            # 缓存residual如果需要
+            if self.need_cache_residual[self.step][i]:
+                # 如果是第一次使用，初始化cached_residual
+                if self.cached_residual is None:
+                    self.cached_residual = torch.zeros([2,w_output.shape[1],w_output.shape[2],w_output.shape[3]],device=device,dtype=dtype)
+                    
+                if i == 0:  # 条件部分
+                    self.cached_residual[:curr_batch_size] = w_residual
+                else:  # 无条件部分
+                    self.cached_residual[curr_batch_size:] = w_residual
+                
+            output = f_output
+            
+        elif 'wars' in curr_method:
+            # 使用cached residual
+            assert hasattr(self, 'cached_residual'), "必须要先过Full attention产生Residual output才能使用Wars"
+            if i == 0:  # 条件部分
+                cached_residual = self.cached_residual[:curr_batch_size]
+            else:  # 无条件部分
+                cached_residual = self.cached_residual[curr_batch_size:]
+            output = w_output + cached_residual
+        else:
+            raise NotImplementedError
+            
+        # 重塑输出维度并应用投影
+        curr_output = output.reshape(curr_batch_size, -1, self.heads * head_dim)
+        curr_output = curr_output.to(query.dtype)
+        curr_output = self.to_out[0](curr_output)
+        curr_output = self.to_out[1](curr_output)
+        
+        # 应用mask如果存在
+        if mask is not None:
+            mask = mask.unsqueeze(-1)
+            curr_output = curr_output.masked_fill(~mask, 0.0)
 
-    if mask is not None:
-        mask = mask.unsqueeze(-1)
-        x = x.masked_fill(~mask, 0.0)
-
-    if 'ASC' in method:
-        # 将cond_spk_txt复制给unconditional
-        x = torch.cat([x, x], dim=0)
+        # 缓存输出如果需要
+        if self.need_cache_output[self.step][i]:
+            # 如果是第一次使用，初始化cached_output
+            if self.cached_output is None:
+                self.cached_output = torch.zeros([2,curr_output.shape[1],curr_output.shape[2]],device=device,dtype=dtype)
+                
+            if i == 0:  # 条件部分
+                self.cached_output[:curr_batch_size] = curr_output
+            else:  # 无条件部分
+                self.cached_output[curr_batch_size:] = curr_output
+                
+        outputs.append(curr_output)
+        
+    if asc_index >= 0:
+        output_copy = outputs[0].clone()
+        outputs.append(output_copy)
+        # 更新缓存
+        if asc_index == 0:
+            if self.need_cache_output[self.step][0]:
+                self.cached_output[:batch_size] = output_copy
+        else:
+            if self.need_cache_output[self.step][1]:
+                self.cached_output[batch_size:] = output_copy
     
-    if self.need_cache_output[self.step]:
-        self.cached_output = x
+    # 合并条件和无条件输出
+    x = torch.cat(outputs, dim=0)
     
+    # 更新step
     self.step += 1
     
     return x
+
+def save_block_output_hook(module, args, kwargs, output):
+    """保存DiTBlock输出的钩子函数"""
+    # 获取当前时间步
+    step = module.attn.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    if block_id == 0:
+        print(f'当前时间步{step}')
+    # 构建保存路径
+    save_dir = "data/block_outputs"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
+    
+    # 保存输出
+    torch.save(output.detach().cpu(), save_path)
+    return output
+
+def save_attn_weight_forward_pre_hook(module, args, kwargs):
+    """保存Attention权重的前向钩子函数"""
+    # 获取当前时间步
+    step = module.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    
+    # 构建保存路径
+    save_dir = "attn_weights"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
+    
+    # 保存权重
+    x = kwargs['x']
+    mask = kwargs.get('mask', None)
+    
+    query = module.to_q(x)
+    key = module.to_k(x)
+    
+    inner_dim = key.shape[-1]
+    attn_weights = query @ key.transpose(-2,-1) / math.sqrt(inner_dim)
+    if mask is not None:
+        attn_weights = attn_weights.masked_fill(~mask, 0.0)
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    torch.save(attn_weights.detach().cpu(), save_path)

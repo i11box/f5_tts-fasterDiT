@@ -26,7 +26,6 @@ from f5_tts.model.modules import (
     ConvPositionEmbedding,
     DiTBlock,
     AttnProcessor,
-    SuperAttnProcessor,
     AdaLayerNormZero_Final,
     precompute_freqs_cis,
     get_pos_embed_indices,
@@ -134,6 +133,7 @@ class DiT(nn.Module):
 
         self.norm_out = AdaLayerNormZero_Final(dim)  # final modulation
         self.proj_out = nn.Linear(dim, mel_dim)
+        self.set_all_block_id()
 
     def forward(
         self,
