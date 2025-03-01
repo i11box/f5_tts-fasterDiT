@@ -663,7 +663,6 @@ def infer_batch_process(
                     to_save_methods['need_residual'].append(block.attn.need_cache_residual)
 
                 with open(f"data\\methods\\{nfe_step}_{delta}_0.125.json", 'w') as file: 
-                    import json
                     file.write(json.dumps(to_save_methods))
 
             generated = generated.to(torch.float32)
