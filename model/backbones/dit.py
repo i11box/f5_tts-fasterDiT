@@ -170,7 +170,7 @@ class DiT(nn.Module):
             x = self.long_skip_connection(torch.cat((x, residual), dim=-1))
 
         x = self.norm_out(x, t)
-        output = self.proj_out(x)       
+        output = self.proj_out(x)
 
         return output
 

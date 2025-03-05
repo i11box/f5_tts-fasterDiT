@@ -22,6 +22,9 @@ import math
 if "TOKENIZERS_PARALLELISM" not in os.environ:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+
+
+
 def method2key(method):
     return method[0] + '&' + method[1]
 
@@ -696,6 +699,87 @@ def save_block_output_hook(module, args, kwargs, output):
     # 保存输出
     torch.save(output.detach().cpu(), save_path)
     return output
+
+def cfg_explore_hook(module, args, kwargs, output):
+    """保存CFG差异的前向钩子函数"""
+    # 获取时间步和block_id
+    t = module.attn.step
+    block_id = module.block_id
+    
+    # 根据cond和uncond的差异，判断token的重要性
+    output_uncond, output_cond = output.chunk(2, dim=0)
+    diff = 2*output_cond - output_uncond
+    # 对diff进行L2归一化
+    diff_norm = F.normalize(torch.abs(diff).sum(dim=-1, keepdim=True), dim=1, p=2)
+    _, cfg_indices = torch.sort(diff_norm, dim=1, descending=True)
+    
+    # 确保保存目录存在
+    save_dir = "data/cfg_explore"
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # 文件路径
+    file_path = f"{save_dir}/cfg_indices.pt"
+    
+    # 读取现有数据（如果存在）
+    if os.path.exists(file_path):
+        indices_dict = torch.load(file_path)
+    else:
+        indices_dict = {}
+    
+    # 添加新数据
+    key = f"{block_id}_{t}"
+    indices_dict[key] = cfg_indices.detach().cpu()
+    
+    # 保存更新后的数据
+    torch.save(indices_dict, file_path)
+    
+    return output
+
+def map_explore_hook(module, args, kwargs):
+    """保存Attention权重的前向钩子函数"""
+    # 获取当前时间步
+    step = module.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    
+    # 构建保存路径
+    save_dir = "data/cfg_explore"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
+    
+    # 保存权重
+    x = kwargs['x']
+    mask = kwargs.get('mask', None)
+    
+    query = module.to_q(x)
+    key = module.to_k(x)
+    
+    inner_dim = key.shape[-1]
+    attn_weights = query @ key.transpose(-2,-1) / math.sqrt(inner_dim)
+    if mask is not None:
+        attn_weights = attn_weights.masked_fill(~mask, 0.0)
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    attn_weight_sum = attn_weights.sum(dim=1)
+    attn_weight_sum,_ = attn_weight_sum.chunk(2,dim=0)
+    attn_weight_norm = F.normalize(attn_weight_sum, dim=-1, p=2)
+    _, attn_indices = torch.sort(attn_weight_norm, dim=1, descending=True)
+
+    # 读取现有数据（如果存在）
+    file_path = f"{save_dir}/map_indices.pt"
+    if os.path.exists(file_path):
+        indices_dict = torch.load(file_path)
+    else:
+        indices_dict = {}
+    
+    # 添加新数据
+    key = f"{block_id}_{step}"
+    indices_dict[key] = attn_indices.detach().cpu()
+    
+    # 保存更新后的数据
+    torch.save(indices_dict, file_path)
 
 def save_attn_weight_forward_pre_hook(module, args, kwargs):
     """保存Attention权重的前向钩子函数"""

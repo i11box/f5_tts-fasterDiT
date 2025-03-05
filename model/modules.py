@@ -22,7 +22,6 @@ from librosa.filters import mel as librosa_mel_fn
 from torch import nn
 import flash_attn
 from x_transformers.x_transformers import apply_rotary_pos_emb
-from f5_tts.model.utils import FLOPsCounter,CompressManager
 from flash_attn import flash_attn_func
 
 # raw wav to mel spec
@@ -408,51 +407,6 @@ class Attention(nn.Module):
 
 
 class AttnProcessor:
-    def __init__(self):
-        self.flops_counter = FLOPsCounter()
-
-    def _create_window_mask(self, seq_len, window_ratio=None):
-        """创建滑动窗口掩码
-        Args:
-            seq_len: 序列长度
-            window_ratio: 窗口比例,default 0.25
-        """
-        mask = None
-        if window_ratio is None:
-            return mask
-        else:
-            window_size = int(seq_len * window_ratio)
-            mask = torch.zeros(seq_len, seq_len, dtype=torch.bool)
-            for i in range(seq_len):
-                start = max(0, i - window_size // 2)
-                end = min(seq_len, i + window_size // 2 + 1)
-                mask[i, start:end] = True
-            return mask
-
-    # 结合传入掩码和窗口比得到最终掩码
-    def _get_final_mask(self, mask, x, attn_heads, window_ratio=None):
-        if window_ratio is not None:
-            window_mask = self._create_window_mask(x.shape[1], window_ratio).to(x.device) # 创建窗口掩码 [seq_len, seq_len]
-            window_mask = window_mask.unsqueeze(0).unsqueeze(0) # 扩展到 [1, 1, seq_len, seq_len]
-            # 扩展到所有batch和head [batch_size, n_heads, seq_len, seq_len]
-            window_mask = window_mask.expand(x.shape[0], attn_heads, x.shape[1], x.shape[1])
-            
-            if mask is not None:
-                # 处理padding掩码 [batch_size, seq_len] -> [batch_size, 1, 1, seq_len]
-                attn_mask = mask.unsqueeze(1).unsqueeze(1) # 扩展到 [batch_size, 1, 1, seq_len]
-                attn_mask = attn_mask.expand(x.shape[0], attn_heads, x.shape[1], x.shape[1])
-                # 组合掩码
-                final_mask = window_mask & attn_mask
-            else:
-                final_mask = window_mask
-        elif mask is not None:
-            # 原有的掩码处理逻辑
-            attn_mask = mask.unsqueeze(1).unsqueeze(1)  # 'b n -> b 1 1 n'
-            final_mask = attn_mask.expand(x.shape[0], attn_heads, x.shape[1], x.shape[1])
-        else:
-            final_mask = None
-
-        return final_mask
 
     def __call__(
         self,
@@ -485,9 +439,6 @@ class AttnProcessor:
         query = query.view(batch_size, -1, attn.heads, head_dim)
         key = key.view(batch_size, -1, attn.heads, head_dim)
         value = value.view(batch_size, -1, attn.heads, head_dim)
-
-        #! 统计注意力计算的FLOPS
-        self.flops_counter.add_attention_flops(query, key, value, attn.heads)
 
         if enable_flash_attn:
             attn_output = flash_attn_func(
@@ -648,7 +599,6 @@ class DiTBlock(nn.Module):
         self.block_id = block_id
         self.ff_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff = FeedForward(dim=dim, mult=ff_mult, dropout=dropout, approximate="tanh")
-        self.compress_manager = CompressManager() #！记录压缩情况
 
     def forward(self, x, t, mask=None, rope=None):  # x: noised input, t: time embedding
         
