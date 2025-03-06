@@ -26,6 +26,7 @@ from f5_tts.model.hook import (
     calculate_ff_flops_hook,
     insert_wars_to_attention_forward,
     transformer_forward_pre_hook_for_eval,
+    save_attn_weight_forward_pre_hook,
     eval_method
 )
 matplotlib.use("Agg")
@@ -630,8 +631,8 @@ def infer_batch_process(
                 hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
                 hooks.append(hook)
                 #hook_for_attn = block.register_forward_hook(save_block_output_hook,with_kwargs=True)
-                # hook_for_attn = block.attn.register_forward_pre_hook(save_attn_weight_forward_pre_hook,with_kwargs=True)
-                # hooks.append(hook_for_attn)
+                hook_for_attn = block.attn.register_forward_pre_hook(save_attn_weight_forward_pre_hook,with_kwargs=True)
+                hooks.append(hook_for_attn)
 
                 hooks.append(hook_ff)
 

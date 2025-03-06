@@ -716,12 +716,21 @@ def save_attn_weight_forward_pre_hook(module, args, kwargs):
     x = kwargs['x']
     mask = kwargs.get('mask', None)
     
-    query = module.to_q(x)
-    key = module.to_k(x)
+    query = module.to_q(x).to(dtype = torch.float32)
+    key = module.to_k(x).to(dtype = torch.float32)
     
     inner_dim = key.shape[-1]
     attn_weights = query @ key.transpose(-2,-1) / math.sqrt(inner_dim)
+
+    # torch.save(query.detach().cpu(), f'step{step}_query.pt')
+    # torch.save(key.detach().cpu(), f'step{step}_key.pt')
+    # print(f'inner_dim: {inner_dim} step{step}')
+    # torch.save(attn_weights.detach().cpu(), f'step{step}_attn_weights_before_softmax.pt')
     if mask is not None:
-        attn_weights = attn_weights.masked_fill(~mask, 0.0)
+        # print(f'using mask in step{step}')
+        attn_weights = attn_weights.masked_fill(~mask, 0)
     attn_weights = F.softmax(attn_weights, dim=-1)
+    # if torch.isnan(attn_weights).any():
+    #     print(f"NaN detected in attn_weights after softmax for block_{block_id}_step_{step}")
+    # torch.save(attn_weights.detach().cpu(), f'step{step}_attn_weights_after_softmax.pt')
     torch.save(attn_weights.detach().cpu(), save_path)

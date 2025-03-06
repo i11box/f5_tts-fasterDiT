@@ -15,7 +15,7 @@ def plot_attention_heatmap(attention, save_path, title="Attention Heatmap", devi
     attention = attention.squeeze(0).cpu().numpy()
     
     plt.figure(figsize=(10, 8))
-    sns.heatmap(attention, cmap='viridis')
+    sns.heatmap(attention, cmap='binary_r',vmin = 0,vmax = 0.5)
     plt.title(title)
     plt.xlabel('Key Position')
     plt.ylabel('Query Position')
@@ -54,28 +54,66 @@ def process_attention_weights(input_dir, output_dir, device="cpu"):
             conditional_weights = weights[0].to(device)  # 第一层是条件输出
             unconditional_weights = weights[1].to(device)  # 第二层是无条件输出
 
-            # 生成保存路径
-            conditional_save_path = os.path.join(
-                conditional_output_dir,
-                f"block_{block_id}_step_{step}_cond.png"
+            # 创建按block和按step分组的目录
+            by_block_cond_dir = os.path.join(output_dir, 'by_block', str(block_id), 'conditional')
+            by_block_uncond_dir = os.path.join(output_dir, 'by_block', str(block_id), 'unconditional')
+            by_step_cond_dir = os.path.join(output_dir, 'by_step', str(step), 'conditional')
+            by_step_uncond_dir = os.path.join(output_dir, 'by_step', str(step), 'unconditional')
+
+            # 确保目录存在
+            os.makedirs(by_block_cond_dir, exist_ok=True)
+            os.makedirs(by_block_uncond_dir, exist_ok=True)
+            os.makedirs(by_step_cond_dir, exist_ok=True)
+            os.makedirs(by_step_uncond_dir, exist_ok=True)
+
+            # 2. 按block分组的保存路径
+            by_block_cond_save_path = os.path.join(
+                by_block_cond_dir,
+                f"step_{step}.png"
             )
-            unconditional_save_path = os.path.join(
-                unconditional_output_dir,
-                f"block_{block_id}_step_{step}_uncond.png"
+            by_block_uncond_save_path = os.path.join(
+                by_block_uncond_dir,
+                f"step_{step}.png"
             )
 
-            # 绘制并保存条件输出热力图
+            # 3. 按step分组的保存路径
+            by_step_cond_save_path = os.path.join(
+                by_step_cond_dir,
+                f"block_{block_id}.png"
+            )
+            by_step_uncond_save_path = os.path.join(
+                by_step_uncond_dir,
+                f"block_{block_id}.png"
+            )
+
+            # 绘制并保存条件输出热力图（按block分组）
             plot_attention_heatmap(
                 conditional_weights,
-                conditional_save_path,
+                by_block_cond_save_path,
                 title=f"Block {block_id} Step {step} Conditional Attention",
                 device=device
             )
 
-            # 绘制并保存无条件输出热力图
+            # 绘制并保存无条件输出热力图（按block分组）
             plot_attention_heatmap(
                 unconditional_weights,
-                unconditional_save_path,
+                by_block_uncond_save_path,
+                title=f"Block {block_id} Step {step} Unconditional Attention",
+                device=device
+            )
+
+            # 绘制并保存条件输出热力图（按step分组）
+            plot_attention_heatmap(
+                conditional_weights,
+                by_step_cond_save_path,
+                title=f"Block {block_id} Step {step} Conditional Attention",
+                device=device
+            )
+
+            # 绘制并保存无条件输出热力图（按step分组）
+            plot_attention_heatmap(
+                unconditional_weights,
+                by_step_uncond_save_path,
                 title=f"Block {block_id} Step {step} Unconditional Attention",
                 device=device
             )
@@ -97,3 +135,7 @@ if __name__ == "__main__":
 
     # 处理注意力权重
     process_attention_weights(input_dir, output_dir, device=device)
+    # attention = torch.load("step6_attn_weights_after_softmax.pt")
+    # attention_cond,attention_uncond = attention.chunk(2,dim=0)
+    # plot_attention_heatmap(attention_cond,'')
+    # plot_attention_heatmap(attention_uncond,'')
