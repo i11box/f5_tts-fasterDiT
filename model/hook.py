@@ -5,7 +5,7 @@ from multiprocessing import Process, Queue
 import os
 import types
 from typing import Any, Optional, Tuple
-
+from skimage.filters import threshold_otsu
 from flash_attn import flash_attn_func
 import librosa
 import numpy as np
@@ -21,6 +21,58 @@ import math
 
 if "TOKENIZERS_PARALLELISM" not in os.environ:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+def calculate_ssim(img1, img2, window_size=11, size_average=True):
+    """计算两个图像的结构相似性指数
+    
+    Args:
+        img1: 第一个图像张量
+        img2: 第二个图像张量
+        window_size: 高斯窗口大小
+        size_average: 是否对结果取平均
+        
+    Returns:
+        ssim值
+    """
+    # 确保输入在同一设备上并且是相同的数据类型
+    device = img1.device
+    dtype = img1.dtype
+    
+    # 将输入转换为float32以进行精确计算
+    img1 = img1.to(torch.float32)
+    img2 = img2.to(torch.float32)
+    
+    # 创建高斯窗口
+    def gaussian(window_size, sigma=1.5):
+        gauss = torch.Tensor([math.exp(-(x - window_size//2)**2/float(2*sigma**2)) for x in range(window_size)])
+        return gauss/gauss.sum()
+    
+    # 创建1D高斯窗口
+    _1D_window = gaussian(window_size).to(device)
+    # 创建2D高斯窗口
+    _2D_window = _1D_window.unsqueeze(1).matmul(_1D_window.unsqueeze(0))
+    window = _2D_window.expand(1, 1, window_size, window_size).contiguous()
+    
+    # 计算SSIM
+    mu1 = F.conv2d(img1, window, padding=window_size//2)
+    mu2 = F.conv2d(img2, window, padding=window_size//2)
+    
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+    
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=window_size//2) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=window_size//2) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=window_size//2) - mu1_mu2
+    
+    C1 = 0.01**2
+    C2 = 0.03**2
+    
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    
+    # 将结果转换回原始数据类型
+    result = ssim_map.mean() if size_average else ssim_map.mean(1).mean(1).mean(1)
+    return result
 
 def method2key(method):
     return method[0] + '&' + method[1]
@@ -160,6 +212,159 @@ def compression_loss(a, b, metric=""):
             ls.append(l)
     l = sum(ls) / len(ls)
     return l
+
+def pre_calibration_hook(module, args, kwargs):
+    """预校准，通过比较模型各层各时间步热力图与对角线的差距确定模型贪心搜索模式"""
+    # 获取当前时间步
+    step = module.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    
+    # 保存权重
+    x = kwargs['x']
+    x,_ = x.chunk(2,dim=0) # 只要条件的
+    mask = kwargs.get('mask', None)
+    
+    query = module.to_q(x).to(dtype = torch.bfloat16)
+    key = module.to_k(x).to(dtype = torch.bfloat16)
+    
+    inner_dim = key.shape[-1]
+    attn_weights = query @ key.transpose(-2,-1) / math.sqrt(inner_dim) # 获取注意力权重
+    if mask is not None:
+        attn_weights = attn_weights.masked_fill(~mask, 0)
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    _,n,_ = attn_weights.shape
+    diagonal_matrix = torch.eye(n, device=attn_weights.device,dtype=attn_weights.dtype)
+    #------------------直接余弦版------------------------
+    # 计算余弦相似度
+    batch_size = attn_weights.shape[0]
+    similarities = []
+
+    for b in range(batch_size):
+        # 获取当前批次的注意力权重
+        attn_mat = attn_weights[b]
+        
+        # 将矩阵展平为向量
+        attn_vec = attn_mat.reshape(-1)
+        diag_vec = diagonal_matrix.reshape(-1)
+        
+        # 计算余弦相似度
+        # 归一化向量
+        attn_norm = attn_vec / torch.norm(attn_vec)
+        diag_norm = diag_vec / torch.norm(diag_vec)
+        
+        # 计算点积
+        sim = torch.dot(attn_norm, diag_norm)
+        similarities.append(sim.item())
+        
+    # 取平均值作为最终相似度
+    similarity = sum(similarities) / len(similarities)
+    #------------------直接余弦版------------------------
+    
+    #---------------------直接计算SSIM版------------------------
+    # # 计算SSIM
+    # batch_size = attn_weights.shape[0]
+    # similarities = []
+
+    # for b in range(batch_size):
+    #     # 获取当前批次的注意力权重
+    #     attn_mat = attn_weights[b]
+        
+    #     # 准备输入格式：[B, C, H, W]
+    #     # 注意力权重和对角矩阵都需要扩展维度
+    #     attn_input = attn_mat.unsqueeze(0).unsqueeze(0)  # [1, 1, n, n]
+    #     diag_input = diagonal_matrix.unsqueeze(0).unsqueeze(0)  # [1, 1, n, n]
+        
+    #     # 计算SSIM
+    #     # data_range是可能的最大值差异，对于softmax后的注意力权重，通常为1
+    #     sim = calculate_ssim(attn_input, diag_input, window_size=11)
+    #     similarities.append(sim.item())
+        
+    # # 取平均值作为最终相似度
+    # similarity = sum(similarities) / len(similarities)
+    #---------------------直接计算SSIM版------------------------
+    
+    
+    
+    #--------------特征计算然后余弦相似度---------------------
+    # # 计算特征
+    # batch_size = attn_weights.shape[0]
+    # features_list = []
+    
+    # for b in range(batch_size):
+    #     # 将注意力权重矩阵展平为特征向量
+    #     attn_flat = attn_weights[b].flatten()
+        
+    #     # 计算统计特征
+    #     std_dev = torch.std(attn_weights[b])
+        
+    #     # 计算梯度特征 (模拟numpy的gradient)
+    #     grad_y = attn_weights[b][:, 1:] - attn_weights[b][:, :-1]
+    #     grad_x = attn_weights[b][1:, :] - attn_weights[b][:-1, :]
+    #     # 填充使尺寸一致
+    #     grad_y = F.pad(grad_y, (0, 1), "constant", 0)
+    #     grad_x = F.pad(grad_x, (0, 0, 0, 1), "constant", 0)
+        
+    #     # 计算梯度幅度
+    #     gradient_magnitude = torch.sqrt(grad_y**2 + grad_x**2 + 1e-10)
+    #     mean_gradient = torch.mean(gradient_magnitude)
+        
+    #     # 计算与对角线的相似度
+    #     diag_similarity = torch.sum(attn_weights[b] * diagonal_matrix) / (torch.sum(diagonal_matrix) + 1e-10)
+        
+    #     # 组合特征
+    #     combined_features = torch.cat([
+    #         attn_flat,
+    #         torch.tensor([diag_similarity, std_dev, mean_gradient], device=attn_weights.device)
+    #     ])
+        
+    #     features_list.append(combined_features)
+    
+    # # 合并批次特征
+    # all_features = torch.stack(features_list)
+    
+    # # 2. 计算与对角线模板的相似度
+    # # 创建对角线模板特征
+    # diagonal_template = diagonal_matrix.flatten()
+    # template_std = torch.std(diagonal_matrix)
+    # # 对角线矩阵的梯度
+    # diag_grad_y = diagonal_matrix[:, 1:] - diagonal_matrix[:, :-1]
+    # diag_grad_x = diagonal_matrix[1:, :] - diagonal_matrix[:-1, :]
+    # diag_grad_y = F.pad(diag_grad_y, (0, 1), "constant", 0)
+    # diag_grad_x = F.pad(diag_grad_x, (0, 0, 0, 1), "constant", 0)
+    # diag_gradient_magnitude = torch.sqrt(diag_grad_y**2 + diag_grad_x**2 + 1e-10)
+    # diag_mean_gradient = torch.mean(diag_gradient_magnitude)
+    
+    # # 构建模板特征
+    # diag_diag_similarity = 1.0  # 对角线与自身的相似度为1
+    # template_features = torch.cat([
+    #     diagonal_template,
+    #     torch.tensor([diag_diag_similarity, template_std, diag_mean_gradient], device=attn_weights.device)
+    # ])
+    
+    # # 计算余弦相似度
+    # template_features = template_features.unsqueeze(0)  # [1, feature_dim]
+    
+    # # 归一化特征向量
+    # template_norm = F.normalize(template_features, p=2, dim=1)
+    # features_norm = F.normalize(all_features, p=2, dim=1)
+    
+    # # 计算余弦相似度
+    # similarity = torch.sum(template_norm * features_norm, dim=1)
+    #--------------特征计算然后余弦相似度---------------------
+    
+    # 记录相似度
+    if not hasattr(module, 'diagonal_similarities'):
+        module.diagonal_similarities = {}
+    module.diagonal_similarities[step] = similarity
+    
+    print(f"Block {block_id}, Step {step}, 与对角线相似度: {similarity:.4f}")
+    
+    module.step += 1
+
 
 """
 校准函数，使用贪心算出各个机制所对应的超参数
@@ -382,6 +587,20 @@ def set_need_cahce_residual(transformer):
                 if block.attn.steps_method[stepi+1][i] in ['full_attention','asc']:
                     block.attn.need_cache_residual[stepi][i] = False
                 block.attn.need_cache_residual[-1][i] = False
+
+def pre_calibration(model):
+    print("Pre Calibration for transformer!!!")
+    transformer = model.transformer # model应该是cfm
+    # 关掉缓存
+    for block in transformer.transformer_blocks:
+        block.attn.need_cache_output = [False,False]
+        block.attn.need_cache_residual = [False,False]
+        block.ff.need_cache_output = [False, False]
+    hooks = []
+    for blocki in range(len(transformer.transformer_blocks)):
+        block = transformer.transformer_blocks[blocki]
+        hooks.append(block.attn.register_forward_pre_hook(pre_calibration_hook, with_kwargs=True))
+    return hooks
 
 def calibration(model, steps=32, threshold=0.1, window_ratio=0.125,is_eval = False):
 
@@ -707,17 +926,17 @@ def save_attn_weight_forward_pre_hook(module, args, kwargs):
         raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
     block_id = module.block_id
     
-    # 构建保存路径
-    save_dir = "attn_weights"
-    os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
+    # # 构建保存路径
+    # save_dir = "attn_weights"
+    # os.makedirs(save_dir, exist_ok=True)
+    # save_path = os.path.join(save_dir, f"block_{block_id}_step_{step}.pt")
     
     # 保存权重
     x = kwargs['x']
     mask = kwargs.get('mask', None)
     
-    query = module.to_q(x).to(dtype = torch.float32)
-    key = module.to_k(x).to(dtype = torch.float32)
+    query = module.to_q(x).to(dtype = torch.bfloat16)
+    key = module.to_k(x).to(dtype = torch.bfloat16)
     
     inner_dim = key.shape[-1]
     attn_weights = query @ key.transpose(-2,-1) / math.sqrt(inner_dim)
@@ -730,7 +949,7 @@ def save_attn_weight_forward_pre_hook(module, args, kwargs):
         # print(f'using mask in step{step}')
         attn_weights = attn_weights.masked_fill(~mask, 0)
     attn_weights = F.softmax(attn_weights, dim=-1)
-    # if torch.isnan(attn_weights).any():
-    #     print(f"NaN detected in attn_weights after softmax for block_{block_id}_step_{step}")
+    if torch.isnan(attn_weights).any():
+        print(f"NaN detected in attn_weights after softmax for block_{block_id}_step_{step}")
     # torch.save(attn_weights.detach().cpu(), f'step{step}_attn_weights_after_softmax.pt')
-    torch.save(attn_weights.detach().cpu(), save_path)
+    # torch.save(attn_weights.detach().cpu(), save_path)

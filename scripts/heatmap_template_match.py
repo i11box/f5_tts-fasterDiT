@@ -13,15 +13,37 @@ from pathlib import Path
 BASE_PATH = 'assets/attention_heatmaps/by_block'
 
 # 1. 预处理：裁剪热力图主体区域
-def preprocess_heatmap(img_path):
+def preprocess_heatmap(img_path,is_fake=False,all_black=False):
     img = cv2.imread(img_path)
     if img is None:
         raise ValueError(f"无法读取图像: {img_path}")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if all_black:
+        # 如果是fake，在原始尺寸的图像上将对角线方向的所有格子设为白色
+        cropped = gray[97:708,125:743]
+        h,w = cropped.shape
+        # 全部为黑
+        black = np.zeros_like(cropped)
+        return black
+    if is_fake:
+        # 如果是fake，在原始尺寸的图像上将对角线方向的所有格子设为白色
+        cropped = gray[97:708,125:743]
+        h,w = cropped.shape
+        # 主对角线（左上到右下）设置为白色
+        black = np.zeros_like(cropped)
+        for i in range(min(h, w)):
+            black[i, i] = 255
+        return black
+
     # 自动裁剪（假设热力图位于图像中心区域）
-    h, w = gray.shape
-    cropped = gray[h//4:3*h//4, w//4:3*w//4]  # 调整裁剪比例
+    cropped = gray[97:708,125:743]  # 调整裁剪比例
     return cropped
+
+def save_processed_image(img_path, output_path, is_fake=False):
+    processed = preprocess_heatmap(img_path, is_fake)
+    cv2.imwrite(output_path, processed)
+    print(f"图像已保存到: {output_path}")
+    return processed
 
 # 2. 对角线特征提取
 def extract_diagonal_features(img):
@@ -48,7 +70,6 @@ def extract_diagonal_features(img):
     h, w = img.shape
     thickness = max(h, w) // 10  # 对角线粗细
     cv2.line(diag_mask, (0, 0), (w, h), 255, thickness)  # 主对角线
-    cv2.line(diag_mask, (0, h), (w, 0), 255, thickness)  # 副对角线
     
     # 计算与对角线模板的相似度
     diag_similarity = np.sum(diag_mask & img) / np.sum(diag_mask)
@@ -113,10 +134,11 @@ def template_match(template_block, template_step, similarity_threshold=0.7):
     
     try:
         # 预处理模板图像
-        template_img = preprocess_heatmap(template_path)
+        template_img = preprocess_heatmap(template_path,False)
         # 提取模板特征
         template_features, template_lines = extract_diagonal_features(template_img)
         
+        cv2.imwrite('template_features.png', template_img)
         # 可视化模板检测的线
         cv2.imwrite('template_lines.png', template_lines)
         print(f"模板线检测结果已保存至 template_lines.png")
@@ -136,15 +158,18 @@ def template_match(template_block, template_step, similarity_threshold=0.7):
                     img = preprocess_heatmap(img_path)
                     # 提取特征
                     img_features, _ = extract_diagonal_features(img)
-                    # 计算相似度
-                    similarity = compute_similarity(template_features, img_features)
+                    # 与对角线的相似度
+                    diag_similarity = compute_similarity(template_features, img_features)
+                    
+                    # 将相似度看作距离
+                    similarity = diag_similarity
                     
                     # 如果相似度超过阈值，添加到匹配结果
                     if similarity >= similarity_threshold:
                         matches.append(img_path)
                         similarities.append(similarity)
                         match_indices.append((block, step))
-                        print(f"匹配: Block {block}, Step {step}, 相似度 {similarity:.4f}")
+                        # print(f"匹配: Block {block}, Step {step}, 相似度 {similarity:.4f}")
                 except Exception as e:
                     print(f"处理图像 {block}/{step} 时出错: {e}")
                     continue
@@ -171,12 +196,15 @@ def template_match(template_block, template_step, similarity_threshold=0.7):
 
 # 示例使用
 if __name__ == "__main__":
+    # path ='assets/attention_heatmaps/by_block/11/conditional/step_0.png'
+    # save_processed_image(path, 'processed.png', is_fake=False)
+    # save_processed_image(path, 'processed_fake.png', is_fake=True)
     # 让用户选择一个模板
     print("请输入模板热力图的block和step (例如: 5 10):")
     try:
         template_block, template_step = map(int, input().split())
         # 设定相似度阈值
-        threshold = 0.85
+        threshold = 0.0
         print(f"使用Block {template_block}, Step {template_step}作为模板，阈值设为{threshold}")
         
         # 执行模板匹配

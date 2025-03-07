@@ -5,7 +5,7 @@ import sys
 import logging
 
 from f5_tts.model.logger import Logger
-
+from skimage.filters import threshold_otsu
 from f5_tts.model.utils import LatencyBenchmark
 
 os.environ["PYTOCH_ENABLE_MPS_FALLBACK"] = "1"  # for MPS device compatibility
@@ -26,6 +26,7 @@ from f5_tts.model.hook import (
     calculate_ff_flops_hook,
     insert_wars_to_attention_forward,
     transformer_forward_pre_hook_for_eval,
+    pre_calibration,
     save_attn_weight_forward_pre_hook,
     eval_method
 )
@@ -482,6 +483,53 @@ def infer_batch_process(
             calibrate_hook = None
             hooks = []
             if calibration_mode:
+                # 首先启动预校准
+                pre_hooks = pre_calibration(model_obj)
+                # 启动一次
+                _ , _ = model_obj.sample(
+                    cond=audio,
+                    text=final_text_list,
+                    duration=duration,
+                    steps=nfe_step,
+                    cfg_strength=cfg_strength,
+                    seed = 42,
+                    sway_sampling_coef=sway_sampling_coef,
+                    delta=delta
+                )
+                # 移除hooks
+                for hook in pre_hooks:
+                    hook.remove()
+                # 收集各个时间步、块下的相似度
+                similarities = []
+                for blocki in range(len(model_obj.transformer.transformer_blocks)):
+                    attn= model_obj.transformer.transformer_blocks[blocki].attn
+                    similarities_list_i = list(attn.diagonal_similarities.values())
+                    similarities.extend(similarities_list_i)
+                
+                # 使用 Otsu 方法计算阈值
+                similarities = torch.tensor(similarities, device='cpu').numpy()
+                threshold = threshold_otsu(similarities)
+                print(f"Pre Calibration Otsu Threshold: {threshold}")
+                
+                ast_first_cnt = 0
+                
+                for blocki in range(len(model_obj.transformer.transformer_blocks)):
+                    attn = model_obj.transformer.transformer_blocks[blocki].attn
+                    attn.ast_first = {}
+                    # 遍历该block的所有时间步相似度
+                    for step, similarity in attn.diagonal_similarities.items():
+                        # 如果相似度大于阈值，设置为true
+                        if similarity >= threshold:
+                            attn.ast_first[step] = True
+                            print(f"AST First:{blocki} {step}")
+                            ast_first_cnt += 1
+                        else:
+                            attn.ast_first[step] = False
+                    # 清理相似度字典以释放内存
+                    del attn.diagonal_similarities
+                
+                print(f"AST First Count: {ast_first_cnt}")
+                
                 # 如果是校准模式，调用calibrate方法
                 calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)
             elif calibration_mode is False and is_eval is False and delta is not None:
