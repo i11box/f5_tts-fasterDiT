@@ -4,8 +4,9 @@ import numpy as np
 from matplotlib import pyplot as plt
 from skimage.measure import block_reduce
 from skimage.feature import hog
-from skimage.metrics import structural_similarity as ssim
 from sklearn.metrics.pairwise import cosine_similarity
+from skimage.filters import threshold_otsu
+from sklearn.cluster import KMeans
 from pathlib import Path
 
 # 基础路径
@@ -21,30 +22,6 @@ def preprocess_heatmap(img_path):
     h, w = gray.shape
     cropped = gray[h//4:3*h//4, w//4:3*w//4]  # 调整裁剪比例
     return cropped
-
-# 生成对角线模板图像
-def generate_diagonal_template(size=(256, 256), add_anti_diagonal=True):
-    """生成一个对角线模板图像
-    
-    参数:
-        size: 图像尺寸 (高度, 宽度)
-        add_anti_diagonal: 是否添加副对角线
-        
-    返回:
-        对角线模板图像
-    """
-    # 创建空白图像(黑色背景)
-    template = np.zeros(size, dtype=np.uint8)
-    h, w = size
-    
-    # 添加主对角线(左上到右下)
-    for i in range(min(h, w)):
-        # 使用线性插值计算对角线上的像素坐标
-        row = int(i * h / min(h, w)) if h > w else i
-        col = int(i * w / min(h, w)) if w > h else i
-        template[row, col] = 255
-    
-    return template
 
 # 2. 对角线特征提取
 def extract_diagonal_features(img):
@@ -69,7 +46,9 @@ def extract_diagonal_features(img):
     # 4. 生成对角线热图并作为特征之一
     diag_mask = np.zeros_like(img)
     h, w = img.shape
-    cv2.line(diag_mask, (0, 0), (w, h), 255, max(h, w) // 10)  # 主对角线
+    thickness = max(h, w) // 10  # 对角线粗细
+    cv2.line(diag_mask, (0, 0), (w, h), 255, thickness)  # 主对角线
+    cv2.line(diag_mask, (0, h), (w, 0), 255, thickness)  # 副对角线
     
     # 计算与对角线模板的相似度
     diag_similarity = np.sum(diag_mask & img) / np.sum(diag_mask)
@@ -90,32 +69,22 @@ def extract_diagonal_features(img):
     return combined_features, line_mask
 
 # 3. 计算与模板的相似度
-def compute_similarity(template_img, img):
-    # 使用SSIM计算结构相似度
-    # 注意：SSIM需要直接比较图像，因此需要调整大小以匹配模板
-    if template_img.shape != img.shape:
-        img = cv2.resize(img, (template_img.shape[1], template_img.shape[0]))
-    
-    # 计算SSIM指标
-    similarity = ssim(template_img, img, data_range=255)
-    return similarity
+def compute_similarity(template_features, image_features):
+    # 使用余弦相似度
+    sim = cosine_similarity(template_features.reshape(1, -1), 
+                           image_features.reshape(1, -1))[0][0]
+    return sim
 
 # 4. 可视化结果
-def visualize_matches(template_img, matches, similarities, is_generated_template=False):
+def visualize_matches(template_path, matches, similarities):
     plt.figure(figsize=(15, 10))
     
     # 显示模板
     plt.subplot(1, min(6, len(matches)+1), 1)
-    if is_generated_template:
-        # 直接显示生成的模板图像
-        plt.imshow(template_img, cmap='gray')
-        plt.title('生成的对角线模板')
-    else:
-        # 从文件中读取模板
-        template_display = cv2.imread(template_img)
-        template_display = cv2.cvtColor(template_display, cv2.COLOR_BGR2RGB)
-        plt.imshow(template_display)
-        plt.title('热力图模板')
+    template_img = cv2.imread(template_path)
+    template_img = cv2.cvtColor(template_img, cv2.COLOR_BGR2RGB)
+    plt.imshow(template_img)
+    plt.title('Template')
     plt.axis('off')
     
     # 显示匹配结果（最多5个）
@@ -124,7 +93,7 @@ def visualize_matches(template_img, matches, similarities, is_generated_template
         match_img = cv2.imread(match_path)
         match_img = cv2.cvtColor(match_img, cv2.COLOR_BGR2RGB)
         plt.imshow(match_img)
-        plt.title(f'相似度: {sim:.4f}')
+        plt.title(f'Sim: {sim:.2f}')
         plt.axis('off')
     
     plt.tight_layout()
@@ -138,13 +107,15 @@ def generate_image_paths(block, step):
     return os.path.join(BASE_PATH, img_path)
 
 # 6. 主函数：模板匹配
-def template_match(template_img, similarity_threshold=0.7, use_generated_template=False):
+def template_match(template_block, template_step, similarity_threshold=0.7):
+    # 获取模板图像
+    template_path = generate_image_paths(template_block, template_step)
+    
     try:
-        # 提取模板特征（我们直接使用图像而不是特征）
-        if not use_generated_template:
-            # 如果使用真实热力图，需要预处理
-            template_img = preprocess_heatmap(template_img)
-        _, template_lines = extract_diagonal_features(template_img)
+        # 预处理模板图像
+        template_img = preprocess_heatmap(template_path)
+        # 提取模板特征
+        template_features, template_lines = extract_diagonal_features(template_img)
         
         # 可视化模板检测的线
         cv2.imwrite('template_lines.png', template_lines)
@@ -163,15 +134,17 @@ def template_match(template_img, similarity_threshold=0.7, use_generated_templat
                     img_path = generate_image_paths(block, step)
                     # 预处理图像
                     img = preprocess_heatmap(img_path)
-                    # 计算SSIM相似度
-                    similarity = compute_similarity(template_img, img)
+                    # 提取特征
+                    img_features, _ = extract_diagonal_features(img)
+                    # 计算相似度
+                    similarity = compute_similarity(template_features, img_features)
                     
                     # 如果相似度超过阈值，添加到匹配结果
                     if similarity >= similarity_threshold:
                         matches.append(img_path)
                         similarities.append(similarity)
                         match_indices.append((block, step))
-                        print(f"匹配: Block {block}, Step {step}, 相似度(SSIM) {similarity:.4f}")
+                        print(f"匹配: Block {block}, Step {step}, 相似度 {similarity:.4f}")
                 except Exception as e:
                     print(f"处理图像 {block}/{step} 时出错: {e}")
                     continue
@@ -182,12 +155,13 @@ def template_match(template_img, similarity_threshold=0.7, use_generated_templat
         sorted_similarities = [similarities[i] for i in sorted_indices]
         sorted_match_indices = [match_indices[i] for i in sorted_indices]
         
-        # 可视化匹配结果
-        if sorted_matches:
-            visualize_matches(template_img if use_generated_template else sorted_matches[0], 
-                         sorted_matches, sorted_similarities, is_generated_template=use_generated_template)
-        else:
-            print("未找到匹配的热力图")
+        # # 使用 Otsu 方法计算阈值
+        # threshold = threshold_otsu(np.array(similarities))
+        # print(f"Otsu Threshold: {threshold}")
+        
+        # # 划分数据
+        # below_threshold = sorted_similarities[sorted_similarities < threshold]
+        # above_threshold = sorted_similarities[sorted_similarities >= threshold]
         
         return sorted_match_indices, sorted_similarities
     
@@ -197,50 +171,16 @@ def template_match(template_img, similarity_threshold=0.7, use_generated_templat
 
 # 示例使用
 if __name__ == "__main__":
-    print("请选择使用方式：")
-    print("1. 使用现有热力图作为模板")
-    print("2. 使用生成的对角线模板")
-    
+    # 让用户选择一个模板
+    print("请输入模板热力图的block和step (例如: 5 10):")
     try:
-        choice = int(input())
-        
+        template_block, template_step = map(int, input().split())
         # 设定相似度阈值
-        threshold = 0.9
+        threshold = 0.85
+        print(f"使用Block {template_block}, Step {template_step}作为模板，阈值设为{threshold}")
         
-        if choice == 1:
-            # 使用现有热力图作为模板
-            print("请输入模板热力图的block和step (例如: 5 10):")
-            template_block, template_step = map(int, input().split())
-            print(f"使用Block {template_block}, Step {template_step}作为模板，阈值设为{threshold}")
-            
-            # 执行模板匹配
-            template_path = generate_image_paths(template_block, template_step)
-            matches, similarities = template_match(template_path, threshold, use_generated_template=False)
-        
-        elif choice == 2:
-            # 使用生成的对角线模板
-            print("生成对角线模板...")
-            print("是否包含副对角线？(y/n, 默认n):")
-            include_anti_diagonal = input().lower() == 'y'
-            
-            # 获取第一张图像的尺寸，用于创建合适大小的模板
-            sample_img = preprocess_heatmap(generate_image_paths(0, 0))
-            h, w = sample_img.shape
-            
-            # 生成对角线模板
-            template = generate_diagonal_template(size=(h, w), add_anti_diagonal=include_anti_diagonal)
-            
-            # 保存生成的模板
-            cv2.imwrite('generated_template.png', template)
-            print(f"生成的对角线模板已保存至 generated_template.png")
-            print(f"使用生成的对角线模板，阈值设为{threshold}")
-            
-            # 执行模板匹配
-            matches, similarities = template_match(template, threshold, use_generated_template=True)
-        
-        else:
-            print("无效的选择，请选择1或2")
-            exit(1)
+        # 执行模板匹配
+        matches, similarities = template_match(template_block, template_step, threshold)
         
         # 打印结果
         print(f"\n找到 {len(matches)} 个匹配结果:")
@@ -249,16 +189,12 @@ if __name__ == "__main__":
         
         # 保存匹配结果到文件
         with open('diagonal_matches_results.txt', 'w') as f:
-            if choice == 1:
-                f.write(f"模板: Block {template_block}, Step {template_step}\n")
-            else:
-                f.write(f"使用生成的对角线模板\n")
+            f.write(f"模板: Block {template_block}, Step {template_step}\n")
             f.write(f"阈值: {threshold}\n")
             f.write(f"找到 {len(matches)} 个匹配结果:\n")
             for (block, step), sim in zip(matches, similarities):
                 f.write(f"Block {block}, Step {step}, 相似度: {sim:.4f}\n")
         print("\n结果已保存至 diagonal_matches_results.txt")
         
-    except ValueError as e:
-        print(f"输入错误: {e}")
-        print("请重新启动脚本并按提示输入")
+    except ValueError:
+        print("输入格式错误，请输入两个整数，用空格分隔")
