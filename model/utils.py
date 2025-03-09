@@ -13,7 +13,9 @@ import jieba
 from pypinyin import lazy_pinyin, Style
 
 import logging
-
+from sklearn.mixture import GaussianMixture
+from skimage.filters import threshold_otsu
+from typing import Optional, List
 import time
 import numpy as np
 from contextlib import contextmanager
@@ -217,6 +219,63 @@ def mask_from_start_end_indices(seq_len: int["b"], start: int["b"], end: int["b"
     end_mask = seq[None, :] < end[:, None]
     return start_mask & end_mask
 
+def threshold_gmm(data):
+    # GMM or otsu
+    try:
+        # 确保数据至少有20个点以拟合GMM
+        if len(data) < 20:
+            print("Too few data points for GMM, falling back to Otsu method")
+            return threshold_otsu(data)
+        
+        # 将数据重塑为sklearn所需的形状
+        data_reshaped = data.reshape(-1, 1)
+        
+        # 使用2个组件拟合GMM（假设数据来自两个高斯分布）
+        gmm = GaussianMixture(n_components=2, random_state=0)
+        gmm.fit(data_reshaped)
+        
+        # 获取参数
+        means = gmm.means_.flatten()  # 均值
+        variances = gmm.covariances_.flatten()  # 方差
+        weights = gmm.weights_.flatten()  # 权重
+        
+        # 确保均值以递增顺序排列
+        if means[0] > means[1]:
+            means = means[::-1]
+            variances = variances[::-1]
+            weights = weights[::-1]
+        
+        # 计算两个高斯分布的交叉点
+        # 解二次方程: w1*N(x|μ1,σ1²) = w2*N(x|μ2,σ2²)
+        # 为了简化，我们使用启发式方法选择两个均值之间的点
+        
+        # 为了更准确地找到交叉点，我们求解二次方程
+        a = 1/(2*variances[1]) - 1/(2*variances[0])
+        b = means[0]/variances[0] - means[1]/variances[1]
+        c = (means[1]**2)/(2*variances[1]) - (means[0]**2)/(2*variances[0]) - np.log((weights[1]/weights[0]) * np.sqrt(variances[0]/variances[1]))
+        
+        # 判别式
+        discriminant = b**2 - 4*a*c
+        
+        # 如果有实数解
+        if discriminant >= 0 and a != 0:
+            # 计算两个解
+            threshold1 = (-b + np.sqrt(discriminant)) / (2*a)
+            threshold2 = (-b - np.sqrt(discriminant)) / (2*a)
+            
+            # 选择位于两个均值之间的解
+            if means[0] <= threshold1 <= means[1]:
+                return threshold1
+            elif means[0] <= threshold2 <= means[1]:
+                return threshold2
+        
+        # 如果没有找到适当的解，使用两个均值的加权平均
+        threshold_value = (means[0] * weights[0] + means[1] * weights[1]) / (weights[0] + weights[1])
+        
+        return threshold_value
+    except Exception as e:
+        print(f"Error in GMM threshold calculation: {e}, falling back to Otsu method")
+        return threshold_otsu(data)
 
 def mask_from_frac_lengths(seq_len: int["b"], frac_lengths: float["b"]):  # noqa: F722 F821
     lengths = (frac_lengths * seq_len).long()

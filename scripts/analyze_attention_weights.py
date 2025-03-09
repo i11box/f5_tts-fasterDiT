@@ -86,6 +86,10 @@ def apply_otsu_threshold(similarities, block_step_info):
     
     # 计算Otsu阈值
     threshold = threshold_otsu(sim_array)
+    # 计算kneedle阈值
+    # threshold = calculate_threshold_kneedle(sim_array)
+    # 计算CDF阈值
+    # threshold = calculate_threshold_cdf_derivative(sim_array)
     
     # 找出高于阈值的索引
     above_threshold_indices = np.where(sim_array > threshold)[0]
@@ -206,6 +210,104 @@ def plot_similarity_histogram(similarities, threshold=None, knee_threshold=None,
     
     plt.show()
 
+def calculate_threshold_kneedle(data):
+    try:
+        from scipy import stats, signal
+        
+        # 确保数据至少有10个点以进行有意义的KDE(核密度估计)
+        if len(data) < 10:
+            print("Too few data points for KDE, falling back to Otsu method")
+            return threshold_otsu(data)
+        
+        # 使用KDE估计概率密度函数
+        # 自动确定带宽参数，或者可以手动设置
+        kde = stats.gaussian_kde(data)
+        
+        # 在数据范围内创建均匀的评估点
+        min_data, max_data = np.min(data), np.max(data)
+        x_grid = np.linspace(min_data, max_data, 1000)
+        
+        # 计算KDE在评估点上的值
+        pdf = kde(x_grid)
+        
+        # 找到局部最小值
+        # 使用负的PDF寻找局部最大值，等同于找PDF的局部最小值
+        minima_indices = signal.find_peaks(-pdf)[0]
+        
+        if len(minima_indices) == 0:
+            print("No local minima found in KDE, falling back to Otsu method")
+            return threshold_otsu(data)
+        
+        # 从所有局部最小值中选择一个作为阈值
+        # 启发式：选择第一个局部最小值，它通常在背景和前景之间
+        # 如果想要更复杂的选择逻辑，可以根据具体问题修改
+        threshold_value = x_grid[minima_indices[0]]
+        
+        return threshold_value
+    except Exception as e:
+        print(f"Error in KDE threshold calculation: {e}, falling back to Otsu method")
+        return threshold_otsu(data)
+
+# 方法2: 使用CDF导数分析找拐点
+def calculate_threshold_cdf_derivative(data):
+    # GMM
+    try:
+        from sklearn.mixture import GaussianMixture
+        
+        # 确保数据至少有20个点以拟合GMM
+        if len(data) < 20:
+            print("Too few data points for GMM, falling back to Otsu method")
+            return threshold_otsu(data)
+        
+        # 将数据重塑为sklearn所需的形状
+        data_reshaped = data.reshape(-1, 1)
+        
+        # 使用2个组件拟合GMM（假设数据来自两个高斯分布）
+        gmm = GaussianMixture(n_components=2, random_state=0)
+        gmm.fit(data_reshaped)
+        
+        # 获取参数
+        means = gmm.means_.flatten()  # 均值
+        variances = gmm.covariances_.flatten()  # 方差
+        weights = gmm.weights_.flatten()  # 权重
+        
+        # 确保均值以递增顺序排列
+        if means[0] > means[1]:
+            means = means[::-1]
+            variances = variances[::-1]
+            weights = weights[::-1]
+        
+        # 计算两个高斯分布的交叉点
+        # 解二次方程: w1*N(x|μ1,σ1²) = w2*N(x|μ2,σ2²)
+        # 为了简化，我们使用启发式方法选择两个均值之间的点
+        
+        # 为了更准确地找到交叉点，我们求解二次方程
+        a = 1/(2*variances[1]) - 1/(2*variances[0])
+        b = means[0]/variances[0] - means[1]/variances[1]
+        c = (means[1]**2)/(2*variances[1]) - (means[0]**2)/(2*variances[0]) - np.log((weights[1]/weights[0]) * np.sqrt(variances[0]/variances[1]))
+        
+        # 判别式
+        discriminant = b**2 - 4*a*c
+        
+        # 如果有实数解
+        if discriminant >= 0 and a != 0:
+            # 计算两个解
+            threshold1 = (-b + np.sqrt(discriminant)) / (2*a)
+            threshold2 = (-b - np.sqrt(discriminant)) / (2*a)
+            
+            # 选择位于两个均值之间的解
+            if means[0] <= threshold1 <= means[1]:
+                return threshold1
+            elif means[0] <= threshold2 <= means[1]:
+                return threshold2
+        
+        # 如果没有找到适当的解，使用两个均值的加权平均
+        threshold_value = (means[0] * weights[0] + means[1] * weights[1]) / (weights[0] + weights[1])
+        
+        return threshold_value
+    except Exception as e:
+        print(f"Error in GMM threshold calculation: {e}, falling back to Otsu method")
+        return threshold_otsu(data)
 def main():
     # 定义注意力权重文件夹路径
     attn_weights_dir = "./attn_weights"

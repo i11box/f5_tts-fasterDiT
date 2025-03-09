@@ -6,6 +6,7 @@ import logging
 
 from f5_tts.model.logger import Logger
 from skimage.filters import threshold_otsu
+from f5_tts.model.utils import threshold_gmm
 from f5_tts.model.utils import LatencyBenchmark
 
 os.environ["PYTOCH_ENABLE_MPS_FALLBACK"] = "1"  # for MPS device compatibility
@@ -512,10 +513,10 @@ def infer_batch_process(
                 # 使用 Otsu 方法计算阈值
                 similarities = torch.tensor(similarities, device='cpu').numpy()
                 similarities_asc = torch.tensor(similarities_asc, device='cpu').numpy()
-                threshold = threshold_otsu(similarities)
-                threshold_asc = threshold_otsu(similarities_asc)
-                print(f"Pre Calibration Otsu Threshold: {threshold}")
-                print(f"Pre Calibration Otsu Threshold_asc: {threshold_asc}")
+                threshold = threshold_gmm(similarities)
+                threshold_asc = threshold_gmm(similarities_asc)
+                print(f"Pre Calibration GMM Threshold: {threshold}")
+                print(f"Pre Calibration GMM Threshold_asc: {threshold_asc}")
                 
                 ast_first_cnt = 0
                 asc_first_cnt = 0
