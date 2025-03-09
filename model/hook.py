@@ -225,7 +225,6 @@ def pre_calibration_hook(module, args, kwargs):
     
     # 保存权重
     x = kwargs['x']
-    x,_ = x.chunk(2,dim=0) # 只要条件的
     mask = kwargs.get('mask', None)
     
     query = module.to_q(x).to(dtype = torch.bfloat16)
@@ -240,28 +239,37 @@ def pre_calibration_hook(module, args, kwargs):
     diagonal_matrix = torch.eye(n, device=attn_weights.device,dtype=attn_weights.dtype)
     #------------------直接余弦版------------------------
     # 计算余弦相似度
-    batch_size = attn_weights.shape[0]
+    attn_weights_cond,attn_weights_uncond = attn_weights.chunk(2,dim = 0)
+    batch_size = attn_weights_cond.shape[0]
     similarities = []
+    similarity_asc = []
 
     for b in range(batch_size):
         # 获取当前批次的注意力权重
-        attn_mat = attn_weights[b]
+        attn_mat = attn_weights_cond[b]
+        attn_mat_uncond = attn_weights_uncond[b]
         
         # 将矩阵展平为向量
         attn_vec = attn_mat.reshape(-1)
         diag_vec = diagonal_matrix.reshape(-1)
+        attn_vec_uncond = attn_mat_uncond.reshape(-1)
         
         # 计算余弦相似度
         # 归一化向量
+        attn_norm_uncond = attn_vec_uncond / torch.norm(attn_vec_uncond)
         attn_norm = attn_vec / torch.norm(attn_vec)
         diag_norm = diag_vec / torch.norm(diag_vec)
         
         # 计算点积
-        sim = torch.dot(attn_norm, diag_norm)
+        sim = torch.dot(attn_norm, diag_norm) # 条件分支与对角线的相似度
+        sim_asc = torch.dot(attn_norm_uncond, attn_norm) # 两个分支的相似度
         similarities.append(sim.item())
+        similarity_asc.append(sim_asc.item())
         
     # 取平均值作为最终相似度
-    similarity = sum(similarities) / len(similarities)
+    similarity_ast = sum(similarities) / len(similarities)
+    similarity_asc = sum(similarity_asc) / len(similarity_asc)
+    
     #------------------直接余弦版------------------------
     
     #---------------------直接计算SSIM版------------------------
@@ -359,9 +367,13 @@ def pre_calibration_hook(module, args, kwargs):
     # 记录相似度
     if not hasattr(module, 'diagonal_similarities'):
         module.diagonal_similarities = {}
-    module.diagonal_similarities[step] = similarity
+    module.diagonal_similarities[step] = similarity_ast
     
-    print(f"Block {block_id}, Step {step}, 与对角线相似度: {similarity:.4f}")
+    if not hasattr(module, 'diagonal_similarities_asc'):
+        module.diagonal_similarities_asc = {}
+    module.diagonal_similarities_asc[step] = similarity_asc
+    
+    # print(f"Block {block_id}, Step {step}, 与对角线相似度: {similarity:.4f}")
     
     module.step += 1
 
@@ -383,43 +395,82 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
-    method_candidates = [
-        ['ast', 'ast'],
-        ['ast', 'asc'],
-        ['asc', 'ast'],
-        ['ast', 'wars'],
-        ['wars', 'ast'],
-        ['wars','asc'],
-        ['asc','wars'],
-        ['wars', 'wars'],
-        ['full_attention', 'ast'],
-        ['ast','full_attention'],
-        ['full_attention', 'asc'],
-        ['asc', 'full_attention'],
-        ['wars', 'full_attention'],
-        ['full_attention', 'wars'],
-    ]
-    # method_candidates = [
-    #     ['ast', 'ast'],
-    #     ['wars','asc'],
-    #     ['wars', 'wars'],
-    #     ['full_attention', 'asc'],
-    # ]
-    # method_candidates = [
-    #     ['ast', 'ast'],
-    #     ['full_attention','ast'],
-    #     ['ast','full_attention'],
-    #     ['wars', 'wars'],
-    #     ['full_attention','wars'],
-    #     ['wars','full_attention'],
-    # ]
-    # method_candidates = [
-    #     ['ast', 'ast'],
-    #     ['wars', 'wars'],
-    # ]
-    
+    # 对候选方法分组
+    # ast & asc
+    def generate_method_candidates(ast_first=True,asc_first=True): 
+        if ast_first and asc_first:
+            return [
+                ['ast', 'ast'],
+                ['ast', 'asc'],
+                ['asc', 'ast'],
+                ['ast', 'wars'],
+                ['wars', 'ast'],
+                ['wars','asc'],
+                ['asc','wars'],
+                ['wars', 'wars'],
+                ['full_attention', 'ast'],
+                ['ast','full_attention'],
+                ['full_attention', 'asc'],
+                ['asc', 'full_attention'],
+                ['wars', 'full_attention'],
+                ['full_attention', 'wars'],
+            ]
+        elif ast_first and not asc_first:
+            return [
+                ['ast', 'ast'],
+                ['ast', 'wars'],
+                ['wars', 'ast'],
+                ['wars', 'wars'],
+                ['full_attention', 'ast'],
+                ['ast','full_attention'],
+                ['wars', 'full_attention'],
+                ['full_attention', 'wars'],
+                ['ast', 'asc'],
+                ['asc', 'ast'],
+                ['wars','asc'],
+                ['asc','wars'],
+                ['full_attention', 'asc'],
+                ['asc', 'full_attention'],
+            ]
+        # asc only
+        elif not ast_first and asc_first:
+            return [
+                ['ast', 'asc'],
+                ['asc', 'ast'],
+                ['wars','asc'],
+                ['asc','wars'],
+                ['full_attention', 'asc'],
+                ['asc', 'full_attention'],
+                ['ast', 'ast'],
+                ['ast', 'wars'],
+                ['wars', 'ast'],
+                ['wars', 'wars'],
+                ['full_attention', 'ast'],
+                ['ast','full_attention'],
+                ['wars', 'full_attention'],
+                ['full_attention', 'wars'],
+            ]
+        # neither
+        else:
+            return [
+                ['wars', 'full_attention'],
+                ['full_attention', 'wars'],
+                ['wars', 'wars'],
+                ['ast', 'asc'],
+                ['asc', 'ast'],
+                ['wars','asc'],
+                ['asc','wars'],
+                ['full_attention', 'asc'],
+                ['asc', 'full_attention'],
+                ['ast', 'ast'],
+                ['ast', 'wars'],
+                ['wars', 'ast'],
+                ['full_attention', 'ast'],
+                ['ast','full_attention'],
+            ]
+
     if not hasattr(model, 'total_pbar'):
-        total_steps = 32 * total_blocks * len(method_candidates)
+        total_steps = 32 * total_blocks * 14 # TODO:magic number
         model.total_pbar = tqdm(
             total=total_steps,
             desc="总体校准进度",
@@ -428,7 +479,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     
     # 当前步进度条
     step_pbar = tqdm(
-        total=total_blocks * len(method_candidates),
+        total=total_blocks * 14,
         desc=f"时间步 {now_stepi}/32",
         position=1,
         leave=False,
@@ -445,6 +496,9 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
             continue
         # method的由强到弱
         selected_method = ['full_attention','full_attention'] # 第一个代表cond
+        attn = block.attn
+        assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
+        method_candidates = generate_method_candidates(attn.ast_first[now_stepi],attn.asc_first[now_stepi])
         for method in method_candidates:
             step_pbar.set_postfix_str(f"block {blocki + 1}/{total_blocks} method: {method}")
             # print(f"Try###Block:{blocki} Step:{now_stepi} Method:{method}")

@@ -501,34 +501,48 @@ def infer_batch_process(
                     hook.remove()
                 # 收集各个时间步、块下的相似度
                 similarities = []
+                similarities_asc = []
                 for blocki in range(len(model_obj.transformer.transformer_blocks)):
                     attn= model_obj.transformer.transformer_blocks[blocki].attn
                     similarities_list_i = list(attn.diagonal_similarities.values())
+                    similarities_asc_list_i = list(attn.diagonal_similarities_asc.values())
                     similarities.extend(similarities_list_i)
+                    similarities_asc.extend(similarities_asc_list_i)
                 
                 # 使用 Otsu 方法计算阈值
                 similarities = torch.tensor(similarities, device='cpu').numpy()
+                similarities_asc = torch.tensor(similarities_asc, device='cpu').numpy()
                 threshold = threshold_otsu(similarities)
+                threshold_asc = threshold_otsu(similarities_asc)
                 print(f"Pre Calibration Otsu Threshold: {threshold}")
+                print(f"Pre Calibration Otsu Threshold_asc: {threshold_asc}")
                 
                 ast_first_cnt = 0
+                asc_first_cnt = 0
                 
                 for blocki in range(len(model_obj.transformer.transformer_blocks)):
                     attn = model_obj.transformer.transformer_blocks[blocki].attn
                     attn.ast_first = {}
+                    attn.asc_first = {}
                     # 遍历该block的所有时间步相似度
-                    for step, similarity in attn.diagonal_similarities.items():
-                        # 如果相似度大于阈值，设置为true
-                        if similarity >= threshold:
+                    for step, similarity, similarity_asc in zip(attn.diagonal_similarities.keys(), attn.diagonal_similarities.values(), attn.diagonal_similarities_asc.values()):
+                        
+                        ratio_b = 1 - 0.1*(blocki / len(model_obj.transformer.transformer_blocks)) # 深层块应该放松
+                        ratio_t = 1 - 0.1*(step / len(attn.diagonal_similarities.keys())) # 后期步应该放松
+                        attn.ast_first[step] = False
+                        attn.asc_first[step] = False
+                        if similarity >= threshold*ratio_b*ratio_t:
                             attn.ast_first[step] = True
-                            print(f"AST First:{blocki} {step}")
                             ast_first_cnt += 1
-                        else:
-                            attn.ast_first[step] = False
+                        if similarity_asc >= threshold_asc*ratio_b*ratio_t:
+                            attn.asc_first[step] = True
+                            asc_first_cnt += 1
                     # 清理相似度字典以释放内存
                     del attn.diagonal_similarities
+                    del attn.diagonal_similarities_asc
                 
                 print(f"AST First Count: {ast_first_cnt}")
+                print(f"ASC First Count: {asc_first_cnt}")
                 
                 # 如果是校准模式，调用calibrate方法
                 calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)
