@@ -8,6 +8,6 @@
 *.flac
 *.pt
 *.png
-
+data/
 # windsurf rules
 .windsurfrules
