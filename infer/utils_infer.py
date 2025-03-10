@@ -479,17 +479,17 @@ def infer_batch_process(
             hooks = []
             if calibrate_hook is not None:
                 hooks.append(calibrate_hook)
-            # 设置一些参数量
-            for block in model_obj.transformer.transformer_blocks:
-                block.attn.full_ops = 0
-                block.attn.efficient_ops = 0
-                block.ff.full_ops = 0
-                block.ff.efficient_ops = 0
-                # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
-                hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
-                hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
-                hooks.append(hook)
-                hooks.append(hook_ff)
+            # # 设置一些参数量
+            # for block in model_obj.transformer.transformer_blocks:
+            #     block.attn.full_ops = 0
+            #     block.attn.efficient_ops = 0
+            #     block.ff.full_ops = 0
+            #     block.ff.efficient_ops = 0
+            #     # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
+            #     hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
+            #     hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
+            #     hooks.append(hook)
+            #     hooks.append(hook_ff)
 
             generated, _ = model_obj.sample(
                 cond=audio,

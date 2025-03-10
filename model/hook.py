@@ -117,6 +117,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         block.attn.forward = types.MethodType(efficient_attention_forward, block.attn)
         block.attn.need_cache_output[now_stepi] = False
         block.attn.need_cache_residual[now_stepi] = False
+        block.ff.need_cache_output[now_stepi] = False
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
