@@ -619,21 +619,21 @@ def infer_batch_process(
             # 统计计算的钩子
             if calibrate_hook is not None:
                 hooks.append(calibrate_hook)
-            # 设置一些参数量
-            for block in model_obj.transformer.transformer_blocks:
-                block.attn.full_ops = 0
-                block.attn.efficient_ops = 0
-                block.ff.full_ops = 0
-                block.ff.efficient_ops = 0
-                # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
-                hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
-                hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
-                hooks.append(hook)
-                #hook_for_attn = block.register_forward_hook(save_block_output_hook,with_kwargs=True)
-                # hook_for_attn = block.attn.register_forward_pre_hook(save_attn_weight_forward_pre_hook,with_kwargs=True)
-                # hooks.append(hook_for_attn)
+            # # 设置一些参数量
+            # for block in model_obj.transformer.transformer_blocks:
+            #     block.attn.full_ops = 0
+            #     block.attn.efficient_ops = 0
+            #     block.ff.full_ops = 0
+            #     block.ff.efficient_ops = 0
+            #     # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
+            #     hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
+            #     hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
+            #     hooks.append(hook)
+            #     #hook_for_attn = block.register_forward_hook(save_block_output_hook,with_kwargs=True)
+            #     # hook_for_attn = block.attn.register_forward_pre_hook(save_attn_weight_forward_pre_hook,with_kwargs=True)
+            #     # hooks.append(hook_for_attn)
 
-                hooks.append(hook_ff)
+                # hooks.append(hook_ff)
 
             generated, _ = model_obj.sample(
                 cond=audio,
@@ -646,22 +646,22 @@ def infer_batch_process(
                 delta=delta
             )
 
-            total_full_ops,total_efficient_ops = 0,0
-            total_full_ops_ff,total_efficient_ops_ff = 0,0
+            # total_full_ops,total_efficient_ops = 0,0
+            # total_full_ops_ff,total_efficient_ops_ff = 0,0
             
-            for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
-                print('-'*55)
-                print(f'块{blocki}原需attn ops: {round(block.attn.full_ops/1e9, 4)}G，加速后attn ops: {round(block.attn.efficient_ops/1e9, 4)}G')
-                total_full_ops += block.attn.full_ops
-                total_efficient_ops += block.attn.efficient_ops
+            # for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
+            #     print('-'*55)
+            #     print(f'块{blocki}原需attn ops: {round(block.attn.full_ops/1e9, 4)}G，加速后attn ops: {round(block.attn.efficient_ops/1e9, 4)}G')
+            #     total_full_ops += block.attn.full_ops
+            #     total_efficient_ops += block.attn.efficient_ops
                 
-                print(f'\n块{blocki}原需ff ops: {round(block.ff.full_ops/1e9, 4)}G，加速后ff ops: {round(block.ff.efficient_ops/1e9, 4)}G')
-                total_full_ops_ff += block.ff.full_ops
-                total_efficient_ops_ff += block.ff.efficient_ops
+            #     print(f'\n块{blocki}原需ff ops: {round(block.ff.full_ops/1e9, 4)}G，加速后ff ops: {round(block.ff.efficient_ops/1e9, 4)}G')
+            #     total_full_ops_ff += block.ff.full_ops
+            #     total_efficient_ops_ff += block.ff.efficient_ops
             
-            print('-'*55)
-            print(f'总原需attn ops: {round(total_full_ops/1e9, 4)}G，加速后attn ops: {round(total_efficient_ops/1e9, 4)}G')
-            print(f'总原需ff ops: {round(total_full_ops_ff/1e9, 4)}G，加速后ff ops: {round(total_efficient_ops_ff/1e9, 4)}G')
+            # print('-'*55)
+            # print(f'总原需attn ops: {round(total_full_ops/1e9, 4)}G，加速后attn ops: {round(total_efficient_ops/1e9, 4)}G')
+            # print(f'总原需ff ops: {round(total_full_ops_ff/1e9, 4)}G，加速后ff ops: {round(total_efficient_ops_ff/1e9, 4)}G')
             
             for hook in hooks:
                 hook.remove()
