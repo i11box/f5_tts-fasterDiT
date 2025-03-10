@@ -174,23 +174,23 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         block.attn.forward = types.MethodType(efficient_attention_forward, block.attn)
         block.attn.need_cache_output[now_stepi] = [False,False]
         block.attn.need_cache_residual[now_stepi] = [False,False]
-        block.ff.need_cache_output[now_stepi] = [False, False]
+        # block.ff.need_cache_output[now_stepi] = [False, False]
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
     method_candidates = [
         ['ast', 'ast'],
         ['ast', 'asc'],
-        ['asc', 'ast'],
+        # ['asc', 'ast'],
         ['ast', 'wars'],
         ['wars', 'ast'],
         ['wars','asc'],
-        ['asc','wars'],
+        # ['asc','wars'],
         ['wars', 'wars'],
         ['full_attention', 'ast'],
         ['ast','full_attention'],
         ['full_attention', 'asc'],
-        ['asc', 'full_attention'],
+        # ['asc', 'full_attention'],
         ['wars', 'full_attention'],
         ['full_attention', 'wars'],
     ]
@@ -245,11 +245,11 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
             # print(f"Try###Block:{blocki} Step:{now_stepi} Method:{method}")
             block.attn.steps_method[now_stepi] = method
             # 修改ff的方法
-            block.ff.steps_method[now_stepi] = method
+            # block.ff.steps_method[now_stepi] = method
 
             for block_ in model.transformer_blocks:
                 block_.attn.step = now_stepi
-                block_.ff.step = now_stepi
+                # block_.ff.step = now_stepi
             efficient_outputs = model.forward(*args, **kwargs)
             efficient_output_cond,efficient_output_uncond = efficient_outputs.chunk(2,dim=0)
             efficient_outputs = 2*efficient_output_cond - efficient_output_uncond
@@ -270,7 +270,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         step_pbar.close()
         
         block.attn.steps_method[now_stepi] = selected_method
-        block.ff.steps_method[now_stepi] = selected_method
+        # block.ff.steps_method[now_stepi] = selected_method
         del loss, efficient_outputs
         
         if now_stepi == 31:
@@ -282,13 +282,13 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     # 在最终确定好所有的机制以后还会走一次transformer的forward，在那一个forward里面step会递增，因此这里需要将递增的step恢复
     for block_ in model.transformer_blocks:
         block_.attn.step = now_stepi
-        block_.ff.step = now_stepi
+        # block_.ff.step = now_stepi
 
     # 在确定本次Step的计划确定之后，将Cache的开关打开，使得本次Step的Cache能够正常产生
     for block in model.transformer_blocks:
         block.attn.need_cache_output[now_stepi] = [True,True]
         block.attn.need_cache_residual[now_stepi] = [True,True]
-        block.ff.need_cache_output[now_stepi] = [True, True]
+        # block.ff.need_cache_output[now_stepi] = [True, True]
 
 # 修改后的校准函数，使用优化后的搜索顺序
 def transformer_forward_pre_hook_for_eval(model, args, kwargs, step_weights):
@@ -439,7 +439,7 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
         assert len(methods) == len(transformer.transformer_blocks)
         for block, method, output_share in zip(transformer.transformer_blocks, methods, output_shares):
             attn = block.attn
-            ff = block.ff
+            # ff = block.ff
             # for attn set some attribute
             attn.window_ratio = window_ratio
             attn.method = method
@@ -452,13 +452,13 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             attn.cached_residual = None
             attn.cached_output = None
             # for ff set some attribute
-            ff.method = method
-            ff.steps_method = [['full_attention', 'full_attention']for _ in range(steps)]
-            ff.need_cache_output = [[True, True] for _ in range(steps)]
-            ff.output_share = output_share
-            ff.step = 0
-            ff.forward = types.MethodType(efficient_ff_forward, ff)
-            ff.cached_output = None
+            # ff.method = method
+            # ff.steps_method = [['full_attention', 'full_attention']for _ in range(steps)]
+            # ff.need_cache_output = [[True, True] for _ in range(steps)]
+            # ff.output_share = output_share
+            # ff.step = 0
+            # ff.forward = types.MethodType(efficient_ff_forward, ff)
+            # ff.cached_output = None
     else:
         with open(method_path, 'r') as f:
             import json
@@ -476,13 +476,13 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
                 attn.cached_residual = None
                 attn.cached_output = None
                 # for ff
-                ff = block.ff
-                ff.steps_method = methods
-                ff.need_cache_output = [[True, True] for _ in range(steps)]
-                ff.output_share = False
-                ff.step = 0
-                ff.forward = types.MethodType(efficient_ff_forward, ff)
-                ff.cached_output = None
+                # ff = block.ff
+                # ff.steps_method = methods
+                # ff.need_cache_output = [[True, True] for _ in range(steps)]
+                # ff.output_share = False
+                # ff.step = 0
+                # ff.forward = types.MethodType(efficient_ff_forward, ff)
+                # ff.cached_output = None
 
             set_need_cahce_residual(transformer)
 
