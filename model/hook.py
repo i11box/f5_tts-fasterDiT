@@ -184,10 +184,36 @@ def pre_calibration_hook(module, args, kwargs):
         
     module.step += 1
 
-def pre_calibration(model):
+def pre_calibration(model,steps=32, threshold=0.1):
+    '''
+    这是正式的预校准
+    '''
     print("Pre Calibration for transformer!!!")
     transformer = model.transformer # model应该是cfm
+    
+    loss_thresholds = []
+    for step_i in range(steps):
+        sub_list = []
+        for blocki in range(len(transformer.transformer_blocks)):
+            threshold_i = (blocki + 1) / len(transformer.transformer_blocks) * threshold
+            sub_list.append(threshold_i)
+        loss_thresholds.append(sub_list)
+
+    insert_wars_to_attention_forward(transformer)
+
+    hook = transformer.register_forward_pre_hook(transformer_forward_pre_hook_for_pre_calibration, with_kwargs=True)
+    transformer.loss_thresholds = loss_thresholds
+    return hook # 返回hook引用便于移除
+    
+
+def pre_calibration_check(model):
+    '''
+    本函数主要用于探索哪些块可以优先使用ast/asc
+    '''
+    print("Pre Calibration Exploring for transformer!!!")
+    transformer = model.transformer # model应该是cfm
     # 关掉缓存
+    
     for block in transformer.transformer_blocks:
         block.attn.need_cache_output = False
         block.attn.need_cache_residual = False
@@ -197,6 +223,85 @@ def pre_calibration(model):
         block = transformer.transformer_blocks[blocki]
         hooks.append(block.attn.register_forward_pre_hook(pre_calibration_hook, with_kwargs=True))
     return hooks
+
+'''
+预校准
+'''
+def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
+    
+    now_stepi = model.transformer_blocks[0].attn.step
+    print(f"Pre Calibration Step: {now_stepi}")
+
+    # 为了避免在搜索candidate method时对cache内容产生改变，因此搜索时需要先关掉cache的开关
+    for block in model.transformer_blocks:
+        block.attn.forward = types.MethodType(efficient_attention_forward, block.attn)
+        block.attn.need_cache_output[now_stepi] = False
+        block.attn.need_cache_residual[now_stepi] = False
+        block.ff.need_cache_output[now_stepi] = False
+
+    # 总进度条
+    total_blocks = len(model.transformer_blocks)
+
+    # 先走一遍得到full-attention的值，预校准情况下，只关注ast_first块，并尝试将它们设为ast
+    raw_outputs = model.forward(*args, **kwargs)
+    raw_output_cond,raw_output_uncond = raw_outputs.chunk(2,dim=0)
+    raw_outputs = 2*raw_output_cond - raw_output_uncond
+    for blocki, block in enumerate(model.transformer_blocks):
+        if now_stepi == 0:
+            continue
+        # method的由强到弱
+        attn = block.attn
+        assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
+        if attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is False:
+            continue
+        elif attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is False:
+            method_candidates = ['AST','wars']
+        elif attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is True:
+            method_candidates = ['ASC']
+        elif attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is True:
+            method_candidates = ['AST', 'wars+ASC','wars','ASC']
+        
+        selected_method = 'full_attention'
+        for method in method_candidates:
+            # print(f"Try###Block:{blocki} Step:{now_stepi} Method:{method}")
+            block.attn.steps_method[now_stepi] = method
+            # 修改ff的方法
+            block.ff.steps_method[now_stepi] = method
+
+            for block_ in model.transformer_blocks:
+                block_.attn.step = now_stepi
+                block_.ff.step = now_stepi
+            efficient_outputs = model.forward(*args, **kwargs)
+            efficient_output_cond,efficient_output_uncond = efficient_outputs.chunk(2,dim=0)
+            efficient_outputs = 2*efficient_output_cond - efficient_output_uncond
+            loss = compression_loss(raw_outputs, efficient_outputs)
+            threshold = model.loss_thresholds[now_stepi][blocki]
+            # print(f"Try### Block:{blocki} Step:{now_stepi} Method:{method} Loss:{loss} Threshold:{threshold}")
+
+            if loss<threshold:
+                remaining = len(method_candidates) - method_candidates.index(method)
+                selected_method = method
+                break
+
+        
+        block.attn.steps_method[now_stepi] = selected_method
+        block.ff.steps_method[now_stepi] = selected_method
+        del loss, efficient_outputs
+
+    del raw_outputs
+
+    # 因为这只是一个transformer的一个prehook，
+    # 在最终确定好所有的机制以后还会走一次transformer的forward，在那一个forward里面step会递增，因此这里需要将递增的step恢复
+    for block_ in model.transformer_blocks:
+        block_.attn.step = now_stepi
+        block_.ff.step = now_stepi
+
+    # 在确定本次Step的计划确定之后，将Cache的开关打开，使得本次Step的Cache能够正常产生
+    for block in model.transformer_blocks:
+        block.attn.need_cache_output[now_stepi] = True
+        block.attn.need_cache_residual[now_stepi] = True
+        block.ff.need_cache_output[now_stepi] = True
+
 
 """
 校准函数，使用贪心算出各个机制所对应的超参数
@@ -243,8 +348,11 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         # method的由强到弱
         attn = block.attn
         assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
-        method_candidates = generate_method_candidates(attn.ast_first[now_stepi],attn.asc_first[now_stepi])
-        
+        if attn.ast_first[now_stepi] is True: # 预校准已经判断过了，因此直接跳过
+            step_pbar.update(4)
+            model.total_pbar.update(4)
+            continue
+        method_candidates = ['AST','wars+ASC','wars','ASC']
         selected_method = 'full_attention'
         for method in method_candidates:
             step_pbar.set_postfix_str(f"block {blocki + 1}/{total_blocks} method: {method}")
@@ -318,7 +426,7 @@ def calibration(model, steps=32, threshold=0.1, window_ratio=0.125):#w
             sub_list.append(threshold_i)
         loss_thresholds.append(sub_list)
 
-    insert_wars_to_attention_forward(transformer)
+    insert_wars_to_attention_forward(transformer, is_method_init=False)
 
     hook = transformer.register_forward_pre_hook(transformer_forward_pre_hook_for_calibration, with_kwargs=True)
     transformer.loss_thresholds = loss_thresholds
@@ -332,7 +440,7 @@ def speedup(model,delta = None, steps=32, window_ratio=0.125):#w
     path = f"data\\methods\\{steps}_{delta}_{window_ratio}.json"
     insert_wars_to_attention_forward(transformer, steps=steps, window_ratio=window_ratio, method_path = path)
 
-def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, method_path = None):#w
+def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, method_path = None,is_method_init=True):#w
     if method_path is None:
         methods = ["full_attention"] * len(transformer.transformer_blocks)
         output_shares = [False] * len(transformer.transformer_blocks)
@@ -346,14 +454,16 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             attn.output_share = output_share
             attn.step = 0
             attn.forward = types.MethodType(efficient_attention_forward, attn)
-            attn.steps_method = ['full_attention'] * steps
+            if is_method_init:
+                attn.steps_method = ['full_attention'] * steps
             attn.need_cache_residual = [True] * steps
             attn.need_cache_output = [True] * steps
             attn.cached_residual = None
             attn.cached_output = None
             # for ff set some attribute
             ff.method = method
-            ff.steps_method = ['full_attention'] * steps
+            if is_method_init:
+                ff.steps_method = ['full_attention'] * steps
             ff.need_cache_output = [True] * steps
             ff.output_share = output_share
             ff.step = 0

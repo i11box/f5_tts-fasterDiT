@@ -123,7 +123,7 @@ def main():
     # 读取lst文件
     with open(lst_file, 'r', encoding='utf-8') as f:
         lines = f.readlines()
-    lines = lines[::10]
+    # lines = lines[::10]
     # 处理每一对句子
     processed_pairs = 0
     total_audio_duration = 0.0

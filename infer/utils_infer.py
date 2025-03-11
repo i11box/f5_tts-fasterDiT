@@ -24,7 +24,8 @@ from f5_tts.model.hook import (
     calculate_flops_hook,
     calculate_ff_flops_hook,
     insert_wars_to_attention_forward,
-    pre_calibration
+    pre_calibration,
+    pre_calibration_check
 )
 matplotlib.use("Agg")
 
@@ -38,6 +39,7 @@ from pydub import AudioSegment, silence
 from transformers import pipeline
 from vocos import Vocos
 
+from skimage.filters import threshold_otsu
 from f5_tts.model import CFM
 from f5_tts.model.utils import (
     get_tokenizer,
@@ -471,7 +473,7 @@ def infer_batch_process(
             calibrate_hook = None
             if calibration_mode:
                 # 先预校准
-                pre_hooks = pre_calibration(model_obj)
+                pre_hooks = pre_calibration_check(model_obj)
                 # 启动一次
                 _ , _ = model_obj.sample(
                     cond=audio,
@@ -500,10 +502,10 @@ def infer_batch_process(
                 # 使用 Otsu 方法计算阈值
                 similarities = torch.tensor(similarities, device='cpu').numpy()
                 similarities_asc = torch.tensor(similarities_asc, device='cpu').numpy()
-                threshold = threshold_gmm(similarities)
-                threshold_asc = threshold_gmm(similarities_asc)
-                print(f"Pre Calibration GMM Threshold: {threshold}")
-                print(f"Pre Calibration GMM Threshold_asc: {threshold_asc}")
+                threshold = threshold_otsu(similarities)
+                threshold_asc = threshold_otsu(similarities_asc)
+                print(f"Pre Calibration Otsu Threshold: {threshold}")
+                print(f"Pre Calibration Otsu Threshold_asc: {threshold_asc}")
                 
                 ast_first_cnt = 0
                 asc_first_cnt = 0
@@ -515,8 +517,8 @@ def infer_batch_process(
                     # 遍历该block的所有时间步相似度
                     for step, similarity, similarity_asc in zip(attn.diagonal_similarities.keys(), attn.diagonal_similarities.values(), attn.diagonal_similarities_asc.values()):
                         
-                        ratio_b = 1 - 0.0*(max(blocki / len(model_obj.transformer.transformer_blocks),0)) # 深层块应该放松
-                        ratio_t = 1 - 0.0*(max(step / len(attn.diagonal_similarities.keys()),0)) # 后期步应该放松
+                        ratio_b = 1 # - 0.2*(max(blocki / (len(model_obj.transformer.transformer_blocks)-0.5),0)) # 深层块应该放松
+                        ratio_t = 1 # - 0.2*(max(step / (len(attn.diagonal_similarities.keys())-0.5),0)) # 后期步应该放松
                         attn.ast_first[step] = False
                         attn.asc_first[step] = False
                         if similarity >= threshold*ratio_b*ratio_t:
@@ -532,8 +534,24 @@ def infer_batch_process(
                 print(f"AST First Count: {ast_first_cnt}")
                 print(f"ASC First Count: {asc_first_cnt}")
                 
+                # 开始预校准
+                pre_calibrate_hook = pre_calibration(model_obj, steps=nfe_step, threshold=delta)
+
+                # 预校准
+                _, _ = model_obj.sample(
+                    cond=audio,
+                    text=final_text_list,
+                    duration=duration,
+                    steps=nfe_step,
+                    cfg_strength=cfg_strength,
+                    sway_sampling_coef=sway_sampling_coef,
+                    delta=delta
+                )
+
+                pre_calibrate_hook.remove()
+                
                 # 如果是校准模式，调用calibrate方法
-                calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)#w
+                calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)
             elif calibration_mode is False and delta is not None:
                 speedup(model_obj, steps = nfe_step, window_ratio=0.125, delta=delta)#w
             else:
@@ -555,6 +573,7 @@ def infer_batch_process(
             #     hooks.append(hook)
             #     hooks.append(hook_ff)
 
+            # 正式校准
             generated, _ = model_obj.sample(
                 cond=audio,
                 text=final_text_list,
