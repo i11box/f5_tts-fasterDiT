@@ -362,6 +362,8 @@ class Attention(nn.Module):
         self.inner_dim = dim_head * heads
         self.dropout = dropout
 
+        self.step = 0
+
         self.context_dim = context_dim
         self.context_pre_only = context_pre_only
         self.enable_flash_attn = enable_flash_attn

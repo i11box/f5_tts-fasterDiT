@@ -104,6 +104,100 @@ def compression_loss(a, b, metric=""):
     l = sum(ls) / len(ls)
     return l
 
+def generate_method_candidates(ast_first=True,asc_first=True): 
+    if ast_first and asc_first:
+        return ['AST', 'wars+ASC', 'wars', 'ASC']
+    elif ast_first and not asc_first:
+        return ['AST', 'wars', 'wars+ASC', 'ASC']
+    # asc only
+    elif not ast_first and asc_first:
+        return ['AST','ASC','wars+ASC','wars']
+    # neither
+    else:
+        return ['AST','wars+ASC','wars','ASC']
+
+def pre_calibration_hook(module, args, kwargs):
+    """预校准，通过比较模型各层各时间步热力图与对角线的差距确定模型贪心搜索模式"""
+    # 获取当前时间步
+    step = module.step
+    
+    # 获取block索引
+    if not hasattr(module, 'block_id'):
+        raise AttributeError("DiTBlock must have block_id attribute. Please set it during initialization.")
+    block_id = module.block_id
+    
+    # 保存权重
+    x = kwargs['x']
+    mask = kwargs.get('mask', None)
+    
+    query = module.to_q(x).to(dtype = torch.bfloat16)
+    key = module.to_k(x).to(dtype = torch.bfloat16)
+    
+    inner_dim = key.shape[-1]
+    attn_weights = query @ key.transpose(-2,-1) / math.sqrt(inner_dim) # 获取注意力权重
+    if mask is not None:
+        attn_weights = attn_weights.masked_fill(~mask, 0)
+    attn_weights = F.softmax(attn_weights, dim=-1)
+    _,n,_ = attn_weights.shape
+    diagonal_matrix = torch.eye(n, device=attn_weights.device,dtype=attn_weights.dtype)
+    
+    # 计算余弦相似度
+    attn_weights_cond,attn_weights_uncond = attn_weights.chunk(2,dim = 0)
+    batch_size = attn_weights_cond.shape[0]
+    similarities = []
+    similarity_asc = []
+
+    for b in range(batch_size):
+        # 获取当前批次的注意力权重
+        attn_mat = attn_weights_cond[b]
+        attn_mat_uncond = attn_weights_uncond[b]
+        
+        # 将矩阵展平为向量
+        attn_vec = attn_mat.reshape(-1)
+        diag_vec = diagonal_matrix.reshape(-1)
+        attn_vec_uncond = attn_mat_uncond.reshape(-1)
+        
+        # 计算余弦相似度
+        # 归一化向量
+        attn_norm_uncond = attn_vec_uncond / torch.norm(attn_vec_uncond)
+        attn_norm = attn_vec / torch.norm(attn_vec)
+        diag_norm = diag_vec / torch.norm(diag_vec)
+        
+        # 计算点积
+        sim = torch.dot(attn_norm, diag_norm) # 条件分支与对角线的相似度
+        sim_asc = torch.dot(attn_norm_uncond, attn_norm) # 两个分支的相似度
+        similarities.append(sim.item())
+        similarity_asc.append(sim_asc.item())
+        
+    # 取平均值作为最终相似度
+    similarity_ast = sum(similarities) / len(similarities)
+    similarity_asc = sum(similarity_asc) / len(similarity_asc)
+    
+    # 记录相似度
+    if not hasattr(module, 'diagonal_similarities'):
+        module.diagonal_similarities = {}
+    module.diagonal_similarities[step] = similarity_ast
+    
+    if not hasattr(module, 'diagonal_similarities_asc'):
+        module.diagonal_similarities_asc = {}
+    module.diagonal_similarities_asc[step] = similarity_asc
+        
+    module.step += 1
+
+def pre_calibration(model):
+    print("Pre Calibration for transformer!!!")
+    transformer = model.transformer # model应该是cfm
+    # 关掉缓存
+    for block in transformer.transformer_blocks:
+        block.attn.need_cache_output = False
+        block.attn.need_cache_residual = False
+        block.ff.need_cache_output = False
+    hooks = []
+    for blocki in range(len(transformer.transformer_blocks)):
+        block = transformer.transformer_blocks[blocki]
+        hooks.append(block.attn.register_forward_pre_hook(pre_calibration_hook, with_kwargs=True))
+    return hooks
+
 """
 校准函数，使用贪心算出各个机制所对应的超参数
 """
@@ -121,9 +215,8 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
 
     # 总进度条
     total_blocks = len(model.transformer_blocks)
-    method_candidates = ['AST', 'wars+ASC', 'wars', 'ASC']
     if not hasattr(model, 'total_pbar'):
-        total_steps = 32 * total_blocks * len(method_candidates)
+        total_steps = 32 * total_blocks * 4
         model.total_pbar = tqdm(
             total=total_steps,
             desc="总体校准进度",
@@ -132,7 +225,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
     
     # 当前步进度条
     step_pbar = tqdm(
-        total=total_blocks * len(method_candidates),
+        total=total_blocks * 4,
         desc=f"时间步 {now_stepi}/32",
         position=1,
         leave=False,
@@ -148,6 +241,10 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         if now_stepi == 0:
             continue
         # method的由强到弱
+        attn = block.attn
+        assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
+        method_candidates = generate_method_candidates(attn.ast_first[now_stepi],attn.asc_first[now_stepi])
+        
         selected_method = 'full_attention'
         for method in method_candidates:
             step_pbar.set_postfix_str(f"block {blocki + 1}/{total_blocks} method: {method}")

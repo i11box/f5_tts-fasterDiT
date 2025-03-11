@@ -24,6 +24,7 @@ from f5_tts.model.hook import (
     calculate_flops_hook,
     calculate_ff_flops_hook,
     insert_wars_to_attention_forward,
+    pre_calibration
 )
 matplotlib.use("Agg")
 
@@ -41,6 +42,7 @@ from f5_tts.model import CFM
 from f5_tts.model.utils import (
     get_tokenizer,
     convert_char_to_pinyin,
+    threshold_gmm
 )
 
 _ref_audio_cache = {}
@@ -468,6 +470,68 @@ def infer_batch_process(
         with torch.inference_mode():
             calibrate_hook = None
             if calibration_mode:
+                # 先预校准
+                pre_hooks = pre_calibration(model_obj)
+                # 启动一次
+                _ , _ = model_obj.sample(
+                    cond=audio,
+                    text=final_text_list,
+                    duration=duration,
+                    steps=nfe_step,
+                    cfg_strength=cfg_strength,
+                    seed = 42,
+                    sway_sampling_coef=sway_sampling_coef,
+                    delta=delta
+                )
+                
+                # 移除hooks
+                for hook in pre_hooks:
+                    hook.remove()
+                # 收集各个时间步、块下的相似度
+                similarities = []
+                similarities_asc = []
+                for blocki in range(len(model_obj.transformer.transformer_blocks)):
+                    attn= model_obj.transformer.transformer_blocks[blocki].attn
+                    similarities_list_i = list(attn.diagonal_similarities.values())
+                    similarities_asc_list_i = list(attn.diagonal_similarities_asc.values())
+                    similarities.extend(similarities_list_i)
+                    similarities_asc.extend(similarities_asc_list_i)
+                
+                # 使用 Otsu 方法计算阈值
+                similarities = torch.tensor(similarities, device='cpu').numpy()
+                similarities_asc = torch.tensor(similarities_asc, device='cpu').numpy()
+                threshold = threshold_gmm(similarities)
+                threshold_asc = threshold_gmm(similarities_asc)
+                print(f"Pre Calibration GMM Threshold: {threshold}")
+                print(f"Pre Calibration GMM Threshold_asc: {threshold_asc}")
+                
+                ast_first_cnt = 0
+                asc_first_cnt = 0
+                
+                for blocki in range(len(model_obj.transformer.transformer_blocks)):
+                    attn = model_obj.transformer.transformer_blocks[blocki].attn
+                    attn.ast_first = {}
+                    attn.asc_first = {}
+                    # 遍历该block的所有时间步相似度
+                    for step, similarity, similarity_asc in zip(attn.diagonal_similarities.keys(), attn.diagonal_similarities.values(), attn.diagonal_similarities_asc.values()):
+                        
+                        ratio_b = 1 - 0.0*(max(blocki / len(model_obj.transformer.transformer_blocks),0)) # 深层块应该放松
+                        ratio_t = 1 - 0.0*(max(step / len(attn.diagonal_similarities.keys()),0)) # 后期步应该放松
+                        attn.ast_first[step] = False
+                        attn.asc_first[step] = False
+                        if similarity >= threshold*ratio_b*ratio_t:
+                            attn.ast_first[step] = True
+                            ast_first_cnt += 1
+                        if similarity_asc >= threshold_asc*ratio_b*ratio_t:
+                            attn.asc_first[step] = True
+                            asc_first_cnt += 1
+                    # 清理相似度字典以释放内存
+                    del attn.diagonal_similarities
+                    del attn.diagonal_similarities_asc
+                
+                print(f"AST First Count: {ast_first_cnt}")
+                print(f"ASC First Count: {asc_first_cnt}")
+                
                 # 如果是校准模式，调用calibrate方法
                 calibrate_hook = calibration(model_obj, steps=nfe_step, threshold=delta, window_ratio=0.125)#w
             elif calibration_mode is False and delta is not None:
