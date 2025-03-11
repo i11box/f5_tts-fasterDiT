@@ -387,26 +387,8 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             set_need_cahce_residual(transformer)
 
 def efficient_ff_forward(self, x):
-    method = self.steps_method[self.step]
-    if 'AST' in method:
-        self.step += 1
-        return self.cached_output
-    elif 'ASC' in method:
-        x,_ = x.chunk(2,dim=0)
-        out_cond = self.ff(x)
-        out = torch.cat([out_cond, out_cond], dim=0)
-        self.step += 1
-        if self.need_cache_output[self.step]:
-            self.cached_output = out
-        return out
-    elif 'wars' in method or 'full_attention' in method:
-        self.step += 1
-        out = self.ff(x)
-        if self.need_cache_output[self.step]:
-            self.cached_output = out
-        return out
-    else:
-        raise NotImplementedError
+    out = self.ff(x)
+    return out
 
 def efficient_attention_forward(
     self,
