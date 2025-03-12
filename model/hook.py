@@ -222,11 +222,54 @@ def pre_calibration_check(model):
     for blocki in range(len(transformer.transformer_blocks)):
         block = transformer.transformer_blocks[blocki]
         hooks.append(block.attn.register_forward_pre_hook(pre_calibration_hook, with_kwargs=True))
+        hooks.append(block.ff.register_forward_hook(pre_calibrate_hook_ff, with_kwargs=True))
+        
     return hooks
 
-'''
-预校准
-'''
+def pre_calibrate_hook_ff(module, args, kwargs, output):
+    
+    # 保存相似度
+    if not hasattr(module, 'ff_similarities'):
+        module.ff_similarities = {}
+    
+    # 时间步获取
+    if not hasattr(module, 'step'):
+        assert hasattr(module, 'step'), "FF module must have step attribute. Please set it during initialization."
+        return output
+    step = module.step
+    
+    # 将输出分为条件分支和非条件分支
+    output_cond, output_uncond = output.chunk(2, dim=0)
+    
+    # 计算两个分支之间的余弦相似度
+    batch_size = output_cond.shape[0]
+    similarities = []
+    
+    for b in range(batch_size):
+        # 获取当前批次的输出
+        out_cond = output_cond[b]
+        out_uncond = output_uncond[b]
+        
+        # 将张量展平为向量
+        out_cond_vec = out_cond.reshape(-1)
+        out_uncond_vec = out_uncond.reshape(-1)
+        
+        # 归一化向量
+        out_cond_norm = out_cond_vec / torch.norm(out_cond_vec)
+        out_uncond_norm = out_uncond_vec / torch.norm(out_uncond_vec)
+        
+        # 计算余弦相似度 (点积)
+        sim = torch.dot(out_cond_norm, out_uncond_norm)
+        similarities.append(sim.item())
+    
+    # 取平均值作为最终相似度
+    similarity = sum(similarities) / len(similarities) if similarities else 0
+    module.ff_similarities[step] = similarity
+    
+    module.step += 1
+    
+    return output
+
 def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
     
     now_stepi = model.transformer_blocks[0].attn.step
@@ -259,7 +302,7 @@ def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
         elif attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is True:
             method_candidates = ['ASC']
         elif attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is True:
-            method_candidates = ['AST', 'wars+ASC','wars','ASC']
+            method_candidates = ['AST','wars+ASC','wars','ASC']
         
         selected_method = 'full_attention'
         for method in method_candidates:
@@ -445,7 +488,7 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
         methods = ["full_attention"] * len(transformer.transformer_blocks)
         output_shares = [False] * len(transformer.transformer_blocks)
         assert len(methods) == len(transformer.transformer_blocks)
-        for block, method, output_share in zip(transformer.transformer_blocks, methods, output_shares):
+        for block_idx, (block, method, output_share) in enumerate(zip(transformer.transformer_blocks, methods, output_shares)):
             attn = block.attn
             ff = block.ff
             # for attn set some attribute
@@ -467,6 +510,7 @@ def insert_wars_to_attention_forward(transformer, steps=32, window_ratio=0.125, 
             ff.need_cache_output = [True] * steps
             ff.output_share = output_share
             ff.step = 0
+            ff.block_id = block_idx
             ff.forward = types.MethodType(efficient_ff_forward, ff)
             ff.cached_output = None
     else:

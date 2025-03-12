@@ -44,7 +44,8 @@ from f5_tts.model import CFM
 from f5_tts.model.utils import (
     get_tokenizer,
     convert_char_to_pinyin,
-    threshold_gmm
+    threshold_gmm,
+    threshold_kneel
 )
 
 _ref_audio_cache = {}
@@ -492,30 +493,38 @@ def infer_batch_process(
                 # 收集各个时间步、块下的相似度
                 similarities = []
                 similarities_asc = []
+                similarities_ff = []
                 for blocki in range(len(model_obj.transformer.transformer_blocks)):
                     attn= model_obj.transformer.transformer_blocks[blocki].attn
+                    ff = model_obj.transformer.transformer_blocks[blocki].ff
                     similarities_list_i = list(attn.diagonal_similarities.values())
                     similarities_asc_list_i = list(attn.diagonal_similarities_asc.values())
+                    similarities_ff_list_i = list(ff.ff_similarities.values())
                     similarities.extend(similarities_list_i)
                     similarities_asc.extend(similarities_asc_list_i)
+                    similarities_ff.extend(similarities_ff_list_i)
                 
                 # 使用 Otsu 方法计算阈值
                 similarities = torch.tensor(similarities, device='cpu').numpy()
                 similarities_asc = torch.tensor(similarities_asc, device='cpu').numpy()
+                similarities_ff = torch.tensor(similarities_ff, device='cpu').numpy()
                 threshold = threshold_otsu(similarities)
-                threshold_asc = threshold_otsu(similarities_asc)
+                threshold_asc = threshold_gmm(similarities_asc)
+                threshold_ff = threshold_kneel(similarities_ff)
                 print(f"Pre Calibration Otsu Threshold: {threshold}")
                 print(f"Pre Calibration Otsu Threshold_asc: {threshold_asc}")
+                print(f"Pre Calibration Otsu Threshold_ff: {threshold_ff}")
                 
                 ast_first_cnt = 0
                 asc_first_cnt = 0
                 
                 for blocki in range(len(model_obj.transformer.transformer_blocks)):
                     attn = model_obj.transformer.transformer_blocks[blocki].attn
+                    ff = model_obj.transformer.transformer_blocks[blocki].ff
                     attn.ast_first = {}
                     attn.asc_first = {}
                     # 遍历该block的所有时间步相似度
-                    for step, similarity, similarity_asc in zip(attn.diagonal_similarities.keys(), attn.diagonal_similarities.values(), attn.diagonal_similarities_asc.values()):
+                    for step, similarity, similarity_asc, similarity_ff in zip(attn.diagonal_similarities.keys(), attn.diagonal_similarities.values(), attn.diagonal_similarities_asc.values(),ff.ff_similarities.values()):
                         
                         ratio_b = 1 # - 0.2*(max(blocki / (len(model_obj.transformer.transformer_blocks)-0.5),0)) # 深层块应该放松
                         ratio_t = 1 # - 0.2*(max(step / (len(attn.diagonal_similarities.keys())-0.5),0)) # 后期步应该放松
@@ -524,12 +533,13 @@ def infer_batch_process(
                         if similarity >= threshold*ratio_b*ratio_t:
                             attn.ast_first[step] = True
                             ast_first_cnt += 1
-                        if similarity_asc >= threshold_asc*ratio_b*ratio_t:
+                        if similarity_asc >= threshold_asc*ratio_b*ratio_t and similarity_ff >= threshold_ff*ratio_b*ratio_t:
                             attn.asc_first[step] = True
                             asc_first_cnt += 1
                     # 清理相似度字典以释放内存
                     del attn.diagonal_similarities
                     del attn.diagonal_similarities_asc
+                    del ff.ff_similarities
                 
                 print(f"AST First Count: {ast_first_cnt}")
                 print(f"ASC First Count: {asc_first_cnt}")
@@ -597,7 +607,7 @@ def infer_batch_process(
             #     total_full_ops_ff += block.ff.full_ops
             #     total_efficient_ops_ff += block.ff.efficient_ops
             
-            # print('-'*55)
+            # print('-'*55,'')
             # print(f'总原需attn ops: {round(total_full_ops/1e9, 4)}G，加速后attn ops: {round(total_efficient_ops/1e9, 4)}G')
             # print(f'总原需ff ops: {round(total_full_ops_ff/1e9, 4)}G，加速后ff ops: {round(total_efficient_ops_ff/1e9, 4)}G')
             

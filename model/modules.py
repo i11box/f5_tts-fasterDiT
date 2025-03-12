@@ -324,10 +324,10 @@ class FeedForward(nn.Module):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = dim_out if dim_out is not None else dim
-
         activation = nn.GELU(approximate=approximate)
         project_in = nn.Sequential(nn.Linear(dim, inner_dim), activation)
         self.ff = nn.Sequential(project_in, nn.Dropout(dropout), nn.Linear(inner_dim, dim_out))
+        self.step = 0
 
     def forward(self, x):
         return self.ff(x)
@@ -885,8 +885,12 @@ class DiTBlock(nn.Module):
         
         ff_output = self.ff(norm)
         
+        #-------------保存ff输出-------------
+        cur_step = self.attn.step
+        torch.save(ff_output, f"data/ff_output/{self.block_id}_{cur_step}.pt")
+        #----------------------------------------
+        
         x = x + gate_mlp.unsqueeze(1) * ff_output
-        #-----------------------------------
         return x
 
 
