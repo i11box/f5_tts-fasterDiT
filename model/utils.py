@@ -8,16 +8,16 @@ from importlib.resources import files
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
+import numpy as np
+from sklearn.mixture import GaussianMixture
+import logging
+from contextlib import contextmanager
+from typing import Callable, Any, Optional, Union, List, Dict, Tuple
+from kneed import KneeLocator
 
 import jieba
 from pypinyin import lazy_pinyin, Style
-from sklearn.mixture import GaussianMixture
-import logging
-
 import time
-import numpy as np
-from contextlib import contextmanager
-from typing import Optional, List
 from dataclasses import dataclass
 
 class FLOPsCounter:
@@ -468,3 +468,30 @@ class LatencyBenchmark:
             func(*args, **kwargs)
         return self.latency
 
+def threshold_kneel(data, curve='concave', direction='increasing'):
+    """使用kneedle方法找到阈值"""
+    # 将输入转换为numpy数组
+    data = np.array(data)
+    
+    # 检查数据是否为空或长度不足
+    if data.size == 0 or data.size < 3:
+        print("警告：数据为空或长度不足，无法找到阈值")
+        return 0.0
+    
+    # 排序数据
+    sorted_data = np.sort(data)
+    
+    # 构造x和y数据
+    y = sorted_data
+    x = np.arange(len(sorted_data))
+    
+    try:
+        # 使用KneeLocator找到阈值
+        kneedle = KneeLocator(x, y, curve=curve, direction=direction)
+        threshold = kneedle.knee_y
+        assert threshold is not None
+    except Exception as e:
+        print(f"警告：使用kneedle方法找到阈值失败：{e}")
+        threshold = np.mean(data)
+    
+    return threshold
