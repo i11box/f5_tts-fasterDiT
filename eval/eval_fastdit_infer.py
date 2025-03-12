@@ -166,7 +166,9 @@ def main():
             print(f"Processed pair {i}/{len(lines)}: {src_id} -> {tgt_id} (infer: {infer_time:.2f}s, audio: {audio_duration:.2f}s)")
             
         except Exception as e:
-            print(f"Error processing line {i}: {e}")
+            import traceback
+            error_msg = f"Error processing line {i}:\n{str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
             continue
     
     # 打印统计信息

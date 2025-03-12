@@ -502,6 +502,11 @@ def infer_batch_process(
                 # 使用 Otsu 方法计算阈值
                 similarities = torch.tensor(similarities, device='cpu').numpy()
                 similarities_asc = torch.tensor(similarities_asc, device='cpu').numpy()
+                
+                # # 指定阈值
+                # threshold = 0.25
+                # threshold_asc = 0.8
+                
                 threshold = threshold_otsu(similarities)
                 threshold_asc = threshold_otsu(similarities_asc)
                 print(f"Pre Calibration Otsu Threshold: {threshold}")
@@ -525,7 +530,7 @@ def infer_batch_process(
                             attn.ast_first[step] = True
                             ast_first_cnt += 1
                         if similarity_asc >= threshold_asc*ratio_b*ratio_t:
-                            attn.asc_first[step] = True
+                            attn.asc_first[step] = False #True
                             asc_first_cnt += 1
                     # 清理相似度字典以释放内存
                     del attn.diagonal_similarities
@@ -561,17 +566,17 @@ def infer_batch_process(
             hooks = []
             if calibrate_hook is not None:
                 hooks.append(calibrate_hook)
-            # # 设置一些参数量
-            # for block in model_obj.transformer.transformer_blocks:
-            #     block.attn.full_ops = 0
-            #     block.attn.efficient_ops = 0
-            #     block.ff.full_ops = 0
-            #     block.ff.efficient_ops = 0
-            #     # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
-            #     hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
-            #     hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
-            #     hooks.append(hook)
-            #     hooks.append(hook_ff)
+            # 设置一些参数量
+            for block in model_obj.transformer.transformer_blocks:
+                block.attn.full_ops = 0
+                block.attn.efficient_ops = 0
+                block.ff.full_ops = 0
+                block.ff.efficient_ops = 0
+                # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
+                hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
+                hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
+                hooks.append(hook)
+                hooks.append(hook_ff)
 
             # 正式校准
             generated, _ = model_obj.sample(
@@ -587,19 +592,19 @@ def infer_batch_process(
             total_full_ops,total_efficient_ops = 0,0
             total_full_ops_ff,total_efficient_ops_ff = 0,0
             
-            # for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
-            #     print('-'*55)
-            #     print(f'块{blocki}原需attn ops: {round(block.attn.full_ops/1e9, 4)}G，加速后attn ops: {round(block.attn.efficient_ops/1e9, 4)}G')
-            #     total_full_ops += block.attn.full_ops
-            #     total_efficient_ops += block.attn.efficient_ops
+            for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
+                print('-'*55)
+                print(f'块{blocki}原需attn ops: {round(block.attn.full_ops/1e9, 4)}G，加速后attn ops: {round(block.attn.efficient_ops/1e9, 4)}G')
+                total_full_ops += block.attn.full_ops
+                total_efficient_ops += block.attn.efficient_ops
                 
-            #     print(f'\n块{blocki}原需ff ops: {round(block.ff.full_ops/1e9, 4)}G，加速后ff ops: {round(block.ff.efficient_ops/1e9, 4)}G')
-            #     total_full_ops_ff += block.ff.full_ops
-            #     total_efficient_ops_ff += block.ff.efficient_ops
+                print(f'\n块{blocki}原需ff ops: {round(block.ff.full_ops/1e9, 4)}G，加速后ff ops: {round(block.ff.efficient_ops/1e9, 4)}G')
+                total_full_ops_ff += block.ff.full_ops
+                total_efficient_ops_ff += block.ff.efficient_ops
             
-            # print('-'*55)
-            # print(f'总原需attn ops: {round(total_full_ops/1e9, 4)}G，加速后attn ops: {round(total_efficient_ops/1e9, 4)}G')
-            # print(f'总原需ff ops: {round(total_full_ops_ff/1e9, 4)}G，加速后ff ops: {round(total_efficient_ops_ff/1e9, 4)}G')
+            print('-'*55)
+            print(f'总原需attn ops: {round(total_full_ops/1e9, 4)}G，加速后attn ops: {round(total_efficient_ops/1e9, 4)}G')
+            print(f'总原需ff ops: {round(total_full_ops_ff/1e9, 4)}G，加速后ff ops: {round(total_efficient_ops_ff/1e9, 4)}G')
             
             for hook in hooks:
                 hook.remove()
