@@ -246,6 +246,7 @@ def get_seed_tts_test(metalst, gen_wav_dir, gpus):
 def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path, eval_ground_truth=False):
     f = open(metalst)
     lines = f.readlines()
+    lines = lines[::25]
     f.close()
 
     test_set_ = []

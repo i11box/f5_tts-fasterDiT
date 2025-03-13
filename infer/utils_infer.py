@@ -491,53 +491,37 @@ def infer_batch_process(
                     hook.remove()
                 # 收集各个时间步、块下的相似度
                 similarities = []
-                similarities_asc = []
                 for blocki in range(len(model_obj.transformer.transformer_blocks)):
                     attn= model_obj.transformer.transformer_blocks[blocki].attn
                     similarities_list_i = list(attn.diagonal_similarities.values())
-                    similarities_asc_list_i = list(attn.diagonal_similarities_asc.values())
                     similarities.extend(similarities_list_i)
-                    similarities_asc.extend(similarities_asc_list_i)
                 
-                # 使用 Otsu 方法计算阈值
                 similarities = torch.tensor(similarities, device='cpu').numpy()
-                similarities_asc = torch.tensor(similarities_asc, device='cpu').numpy()
                 
                 # # 指定阈值
                 # threshold = 0.25
-                # threshold_asc = 0.8
                 
-                threshold = threshold_otsu(similarities)
-                threshold_asc = threshold_otsu(similarities_asc)
-                print(f"Pre Calibration Otsu Threshold: {threshold}")
-                print(f"Pre Calibration Otsu Threshold_asc: {threshold_asc}")
+                threshold = threshold_q(similarities, ratio=0.07)
+                print(f"Pre Calibration Percentile Threshold: {threshold}")
                 
                 ast_first_cnt = 0
-                asc_first_cnt = 0
                 
                 for blocki in range(len(model_obj.transformer.transformer_blocks)):
                     attn = model_obj.transformer.transformer_blocks[blocki].attn
                     attn.ast_first = {}
-                    attn.asc_first = {}
                     # 遍历该block的所有时间步相似度
-                    for step, similarity, similarity_asc in zip(attn.diagonal_similarities.keys(), attn.diagonal_similarities.values(), attn.diagonal_similarities_asc.values()):
+                    for step, similarity in attn.diagonal_similarities.items():
                         
                         ratio_b = 1 # - 0.2*(max(blocki / (len(model_obj.transformer.transformer_blocks)-0.5),0)) # 深层块应该放松
                         ratio_t = 1 # - 0.2*(max(step / (len(attn.diagonal_similarities.keys())-0.5),0)) # 后期步应该放松
                         attn.ast_first[step] = False
-                        attn.asc_first[step] = False
                         if similarity >= threshold*ratio_b*ratio_t:
                             attn.ast_first[step] = True
                             ast_first_cnt += 1
-                        if similarity_asc >= threshold_asc*ratio_b*ratio_t:
-                            attn.asc_first[step] = False #True
-                            asc_first_cnt += 1
                     # 清理相似度字典以释放内存
                     del attn.diagonal_similarities
-                    del attn.diagonal_similarities_asc
                 
                 print(f"AST First Count: {ast_first_cnt}")
-                print(f"ASC First Count: {asc_first_cnt}")
                 
                 # 开始预校准
                 pre_calibrate_hook = pre_calibration(model_obj, steps=nfe_step, threshold=delta)
@@ -561,22 +545,35 @@ def infer_batch_process(
                 speedup(model_obj, steps = nfe_step, window_ratio=0.125, delta=delta)#w
             else:
                 insert_wars_to_attention_forward(model_obj.transformer,steps = nfe_step, window_ratio=0.125)#w
-                
+            
+            # 统计本次产生的ast和wars数量
+            ast_cnt = 0
+            wars_cnt = 0
+            for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
+                for method in block.attn.steps_method:
+                    if method == "AST":
+                        ast_cnt += 1
+                    elif method == "wars":
+                        wars_cnt += 1
+            
+            print(f"AST Count: {ast_cnt}")
+            print(f"WARS Count: {wars_cnt}")
+            
             # 统计计算的钩子
             hooks = []
             if calibrate_hook is not None:
                 hooks.append(calibrate_hook)
-            # 设置一些参数量
-            for block in model_obj.transformer.transformer_blocks:
-                block.attn.full_ops = 0
-                block.attn.efficient_ops = 0
-                block.ff.full_ops = 0
-                block.ff.efficient_ops = 0
-                # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
-                hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
-                hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
-                hooks.append(hook)
-                hooks.append(hook_ff)
+            # # 设置一些参数量
+            # for block in model_obj.transformer.transformer_blocks:
+            #     block.attn.full_ops = 0
+            #     block.attn.efficient_ops = 0
+            #     block.ff.full_ops = 0
+            #     block.ff.efficient_ops = 0
+            #     # block.attention.need_cache_residual = [True] * len(block.attention.need_cache_residual)
+            #     hook = block.attn.register_forward_pre_hook(calculate_flops_hook, with_kwargs=True)
+            #     hook_ff = block.ff.register_forward_pre_hook(calculate_ff_flops_hook, with_kwargs=True)
+            #     hooks.append(hook)
+            #     hooks.append(hook_ff)
 
             # 正式校准
             generated, _ = model_obj.sample(
@@ -592,19 +589,19 @@ def infer_batch_process(
             total_full_ops,total_efficient_ops = 0,0
             total_full_ops_ff,total_efficient_ops_ff = 0,0
             
-            for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
-                print('-'*55)
-                print(f'块{blocki}原需attn ops: {round(block.attn.full_ops/1e9, 4)}G，加速后attn ops: {round(block.attn.efficient_ops/1e9, 4)}G')
-                total_full_ops += block.attn.full_ops
-                total_efficient_ops += block.attn.efficient_ops
+            # for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
+            #     print('-'*55)
+            #     print(f'块{blocki}原需attn ops: {round(block.attn.full_ops/1e9, 4)}G，加速后attn ops: {round(block.attn.efficient_ops/1e9, 4)}G')
+            #     total_full_ops += block.attn.full_ops
+            #     total_efficient_ops += block.attn.efficient_ops
                 
-                print(f'\n块{blocki}原需ff ops: {round(block.ff.full_ops/1e9, 4)}G，加速后ff ops: {round(block.ff.efficient_ops/1e9, 4)}G')
-                total_full_ops_ff += block.ff.full_ops
-                total_efficient_ops_ff += block.ff.efficient_ops
+            #     print(f'\n块{blocki}原需ff ops: {round(block.ff.full_ops/1e9, 4)}G，加速后ff ops: {round(block.ff.efficient_ops/1e9, 4)}G')
+            #     total_full_ops_ff += block.ff.full_ops
+            #     total_efficient_ops_ff += block.ff.efficient_ops
             
-            print('-'*55)
-            print(f'总原需attn ops: {round(total_full_ops/1e9, 4)}G，加速后attn ops: {round(total_efficient_ops/1e9, 4)}G')
-            print(f'总原需ff ops: {round(total_full_ops_ff/1e9, 4)}G，加速后ff ops: {round(total_efficient_ops_ff/1e9, 4)}G')
+            # print('-'*55)
+            # print(f'总原需attn ops: {round(total_full_ops/1e9, 4)}G，加速后attn ops: {round(total_efficient_ops/1e9, 4)}G')
+            # print(f'总原需ff ops: {round(total_full_ops_ff/1e9, 4)}G，加速后ff ops: {round(total_efficient_ops_ff/1e9, 4)}G')
             
             for hook in hooks:
                 hook.remove()
@@ -706,3 +703,17 @@ def save_spectrogram(spectrogram, path):
     plt.colorbar()
     plt.savefig(path)
     plt.close()
+
+# 使用百分位数计算阈值
+def threshold_q(data, ratio=0.5):
+    """
+    使用百分位数方法计算阈值
+    
+    Args:
+        data (numpy.ndarray): 输入数据数组
+        ratio (float): 通过阈值的数的比例
+        
+    Returns:
+        float: 计算得到的阈值
+    """
+    return float(np.percentile(data, (1-ratio) * 100))

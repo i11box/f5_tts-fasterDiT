@@ -104,18 +104,6 @@ def compression_loss(a, b, metric=""):
     l = sum(ls) / len(ls)
     return l
 
-def generate_method_candidates(ast_first=True,asc_first=True): 
-    if ast_first and asc_first:
-        return ['AST', 'wars+ASC', 'wars', 'ASC']
-    elif ast_first and not asc_first:
-        return ['AST', 'wars', 'wars+ASC', 'ASC']
-    # asc only
-    elif not ast_first and asc_first:
-        return ['AST','ASC','wars+ASC','wars']
-    # neither
-    else:
-        return ['AST','wars+ASC','wars','ASC']
-
 def pre_calibration_hook(module, args, kwargs):
     """预校准，通过比较模型各层各时间步热力图与对角线的差距确定模型贪心搜索模式"""
     # 获取当前时间步
@@ -145,42 +133,31 @@ def pre_calibration_hook(module, args, kwargs):
     attn_weights_cond,attn_weights_uncond = attn_weights.chunk(2,dim = 0)
     batch_size = attn_weights_cond.shape[0]
     similarities = []
-    similarity_asc = []
 
     for b in range(batch_size):
         # 获取当前批次的注意力权重
         attn_mat = attn_weights_cond[b]
-        attn_mat_uncond = attn_weights_uncond[b]
         
         # 将矩阵展平为向量
         attn_vec = attn_mat.reshape(-1)
         diag_vec = diagonal_matrix.reshape(-1)
-        attn_vec_uncond = attn_mat_uncond.reshape(-1)
         
         # 计算余弦相似度
         # 归一化向量
-        attn_norm_uncond = attn_vec_uncond / torch.norm(attn_vec_uncond)
         attn_norm = attn_vec / torch.norm(attn_vec)
         diag_norm = diag_vec / torch.norm(diag_vec)
         
         # 计算点积
         sim = torch.dot(attn_norm, diag_norm) # 条件分支与对角线的相似度
-        sim_asc = torch.dot(attn_norm_uncond, attn_norm) # 两个分支的相似度
         similarities.append(sim.item())
-        similarity_asc.append(sim_asc.item())
         
     # 取平均值作为最终相似度
     similarity_ast = sum(similarities) / len(similarities)
-    similarity_asc = sum(similarity_asc) / len(similarity_asc)
     
     # 记录相似度
     if not hasattr(module, 'diagonal_similarities'):
         module.diagonal_similarities = {}
     module.diagonal_similarities[step] = similarity_ast
-    
-    if not hasattr(module, 'diagonal_similarities_asc'):
-        module.diagonal_similarities_asc = {}
-    module.diagonal_similarities_asc[step] = similarity_asc
         
     module.step += 1
 
@@ -238,10 +215,7 @@ def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
         block.attn.need_cache_output[now_stepi] = False
         block.attn.need_cache_residual[now_stepi] = False
         block.ff.need_cache_output[now_stepi] = False
-
-    # 总进度条
-    total_blocks = len(model.transformer_blocks)
-
+    
     # 先走一遍得到full-attention的值，预校准情况下，只关注ast_first块，并尝试将它们设为ast
     raw_outputs = model.forward(*args, **kwargs)
     raw_output_cond,raw_output_uncond = raw_outputs.chunk(2,dim=0)
@@ -251,15 +225,11 @@ def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
             continue
         # method的由强到弱
         attn = block.attn
-        assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
-        if attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is False:
+        assert hasattr(attn, 'ast_first'), "attn.ast_first not found"
+        if attn.ast_first[now_stepi] is False:
             continue
-        elif attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is False:
-            method_candidates = ['AST','wars']
-        elif attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is True:
-            method_candidates = ['ASC']
-        elif attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is True:
-            method_candidates = ['AST', 'wars+ASC','wars','ASC']
+        elif attn.ast_first[now_stepi] is True:
+            method_candidates = ['AST']
         
         selected_method = 'full_attention'
         for method in method_candidates:
@@ -347,8 +317,8 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
             continue
         # method的由强到弱
         attn = block.attn
-        assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
-        if attn.ast_first[now_stepi] is True: # 预校准已经判断过了，因此直接跳过
+        assert hasattr(attn, 'ast_first') , "attn.ast_first not found"
+        if attn.steps_method[now_stepi] == 'AST': # 预校准已经判断过了，因此直接跳过
             step_pbar.update(4)
             model.total_pbar.update(4)
             continue
