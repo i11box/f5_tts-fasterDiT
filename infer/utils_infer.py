@@ -540,18 +540,33 @@ def infer_batch_process(
                 print(f"ASC First Count: {asc_first_cnt}")
                 
                 # 开始预校准
+
                 pre_calibrate_hook = pre_calibration(model_obj, steps=nfe_step, threshold=delta)
 
                 # 预校准
-                _, _ = model_obj.sample(
-                    cond=audio,
-                    text=final_text_list,
-                    duration=duration,
-                    steps=nfe_step,
-                    cfg_strength=cfg_strength,
-                    sway_sampling_coef=sway_sampling_coef,
-                    delta=delta
-                )
+                for mode in range(2,-1,-1):
+                    method_dict = {
+                        'full_attention':0,
+                        'AST':0,
+                        'ASC':0,
+                        'wars+ASC':0,
+                        'wars':0
+                    }
+                    insert_wars_to_attention_forward(model_obj.transformer,steps = nfe_step, window_ratio=0.125, is_method_init=False)
+                    model_obj.transformer.calibration_mode = mode
+                    _, _ = model_obj.sample(
+                        cond=audio,
+                        text=final_text_list,
+                        duration=duration,
+                        steps=nfe_step,
+                        cfg_strength=cfg_strength,
+                        sway_sampling_coef=sway_sampling_coef,
+                        delta=delta
+                    )
+                    for blocki, block in enumerate(model_obj.transformer.transformer_blocks):
+                        for method_i in block.attn.steps_method:
+                            method_dict[method_i] += 1
+                    print(method_dict)
 
                 pre_calibrate_hook.remove()
                 

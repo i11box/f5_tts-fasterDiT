@@ -246,19 +246,35 @@ def transformer_forward_pre_hook_for_pre_calibration(model, args, kwargs):
     raw_outputs = model.forward(*args, **kwargs)
     raw_output_cond,raw_output_uncond = raw_outputs.chunk(2,dim=0)
     raw_outputs = 2*raw_output_cond - raw_output_uncond
+    
+    # 通过model内部的校准flag控制本次校准的目标，令00为ast-asc，10为ast，01为asc
+    assert hasattr(model, 'calibration_mode')
+    calibration_mode = model.calibration_mode
+    
     for blocki, block in enumerate(model.transformer_blocks):
         if now_stepi == 0:
+            print(f'current mode:{calibration_mode}')
             continue
         # method的由强到弱
         attn = block.attn
         assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
-        if attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is False:
-            continue
-        elif attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is False:
-            method_candidates = ['AST','wars']
-        elif attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is True:
-            method_candidates = ['ASC']
-        elif attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is True:
+        
+        if calibration_mode == 2:
+            if attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is False:
+                method_candidates = ['AST','wars']
+            else:
+                continue
+        elif calibration_mode == 1:
+            if attn.ast_first[now_stepi] is False and attn.asc_first[now_stepi] is True:
+                method_candidates = ['ASC']
+            else:
+                continue
+        elif calibration_mode == 0:
+            if attn.ast_first[now_stepi] is True and attn.asc_first[now_stepi] is True:
+                method_candidates = ['AST', 'wars+ASC','wars','ASC']
+            else:
+                continue
+        else:
             method_candidates = ['AST', 'wars+ASC','wars','ASC']
         
         selected_method = 'full_attention'
@@ -348,7 +364,7 @@ def transformer_forward_pre_hook_for_calibration(model, args, kwargs):
         # method的由强到弱
         attn = block.attn
         assert hasattr(attn, 'ast_first') and hasattr(attn, 'asc_first'), "attn.ast_first or attn.asc_first not found"
-        if attn.ast_first[now_stepi] is True: # 预校准已经判断过了，因此直接跳过
+        if block.attn.steps_method[now_stepi] != 'full_attention': # 预校准已经判断过了，因此直接跳过
             step_pbar.update(4)
             model.total_pbar.update(4)
             continue

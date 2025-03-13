@@ -248,6 +248,9 @@ def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path
     lines = f.readlines()
     f.close()
 
+    # 取20个
+    lines = lines[::10]
+
     test_set_ = []
     for line in tqdm(lines):
         ref_utt, ref_dur, ref_txt, gen_utt, gen_dur, gen_txt = line.strip().split("\t")
